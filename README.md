@@ -508,6 +508,13 @@ tools/
   make_dump.py        无头 Chrome 跑 dump.html → dump.json（含实体反转义与 JSON 预校）
   verify_exports.py   独立实现的 DXF/SVG/CSV 交叉校验器（**2484 项**，纯标准库）
   dump.json           上一次导出的样本快照（18 组场景）
+  ci_run_tests.py     CI 里跑总控页并卡硬指标（套件数 / 每套断言数 / 启动自检）
+  publish.py          发布到 GitHub + 开 Pages（令牌走 stdin，不落盘）
+
+index.html            仓库根重定向 → app/index.html（GitHub Pages 入口）
+.nojekyll             告诉 Pages 不跑 Jekyll，否则 `_` 开头的目录会被吞
+.gitattributes        行尾锁 LF（导出文本是逐字符比对的，本地/CI 必须同字节）
+.github/workflows/tests.yml   push 就跑 11 套件 + 外部交叉校验
 ```
 
 ### 跑外部交叉校验
@@ -781,3 +788,77 @@ DXF 解析、带 bulge 的精确面积、含圆弧极值点的包围盒、RFC418
 - 一条板边只能承担一种接合。若设计上过约束，程序会降级并提示，
   被放弃的那几处需要改用木销或自攻螺丝——这是几何限制，不是 bug
 - 图片生成的立牌/叠层件，建议先按 1:1 打印纸样比对再上机
+
+## 部署到 GitHub Pages
+
+纯静态、无构建、无依赖 —— 把仓库丢上去开个 Pages 就能用。
+
+### 一行命令
+
+```powershell
+python tools\publish.py marine-ply-diy
+# 然后粘上令牌、回车
+```
+
+它会依次完成：验证令牌 → 建仓（已存在则复用）→ `push -u origin main`
+→ 开 Pages（分支 `main` / 目录 `/`）→ **轮询直到站点真的能打开**，
+最后还会逐个拉 `app/index.html`、`app/js/joints.js`、`app/tests/index.html`
+确认资源没 404。
+
+> 为什么要轮询而不是 push 完就报成功：Pages 首次构建要 1–2 分钟，
+> 这段时间内 URL 返回 404。"推上去了"不等于"网站能访问"，
+> 后者才是需求，所以验收标准定在后者。
+
+### 令牌怎么给、为何这么给
+
+`publish.py` **本身不含任何密钥**，可以安心入仓。令牌的路径是：
+
+| 环节 | 做法 | 为什么 |
+|---|---|---|
+| 输入 | `stdin` 读一行 | 写在命令行会进 PowerShell 历史（`ConsoleHost_history.txt`） |
+| 传给 git | `GIT_ASKPASS` 回调本脚本自己 | 不用把 `https://user:token@github.com/...` 写进 remote |
+| remote | 干净 `https://github.com/<user>/<repo>.git` | 带凭据的 URL 会永久落在 `.git/config` 里 |
+| 缓存 | `-c credential.helper=`（置空） | 防止 Windows 凭据管理器默默存下来 |
+| 日志 | 所有输出过 `mask()` | git 报错信息里真的会带上完整 URL |
+
+需要的权限：classic token 勾 `repo`；或 fine-grained 给
+Contents / Pages / Administration 三项 Read+Write（Administration 只为建仓，
+仓库已存在可不给）。
+
+> ⚠ **令牌一旦公开贴出就当作已泄露处理**。GitHub 有秘钥扫描，
+> 公开粘贴过的 `ghp_...` 会被自动吊销，再拿去调 API 只会得到
+> `401 Bad credentials`。遇到这个报错不是脚本错了，是该重新签一个。
+
+### 仓库名建议用 ASCII
+
+中文仓库名（如"海洋板DIY"）GitHub 允许，但 Pages 域名会被 punycode 成
+`xn--...` 的形状，分享链接很难看。`publish.py` 建仓后会**以 GitHub 返回的
+真实 `name` 为准**重算 remote 与站点地址（GitHub 会对仓库名做归一化，
+押注"我传什么就是什么"会把两个地址全算错）。
+
+另外：**GitHub Pages 免费版要求仓库 public**（private 需 Pro）。
+
+### 手动推也可以
+
+```powershell
+git remote add origin https://github.com/<你的帐号>/marine-ply-diy.git
+git push -u origin main
+# 然后 GitHub → Settings → Pages → Source: Deploy from a branch
+#                        → Branch: main / 目录: / (root) → Save
+```
+
+### CI：push 就跑全部测试
+
+`.github/workflows/tests.yml` 在 ubuntu 上装 headless Chrome、起一个
+`python3 -m http.server`，照样跑 11 套件 + 2484 项外部交叉校验。
+
+它**不只看"FAILS 0"**。这是个真实的坑：套件中途抛异常时根本不会写出
+TOTAL 行，"页面里没有 FAIL 字样"于是会被误当成通过。所以
+`tools/ci_run_tests.py` 同时卡三条硬指标：
+
+1. 套件数必须 **= 11**（缺一个就红）
+2. **每个**套件的断言数 >= 基线（防"只跑了前三条就抛异常"）
+3. 总断言数 >= **1845**；另外单独查启动自检 `59/59` 和根重定向
+
+这三条做过变异验证：把 `test-visual` 基线从 147 改成 200（模拟断言变少），
+脚本当场 `rc=1` 并同时报出"断言数 147 < 基线 200"与"总断言数不足"两条。
