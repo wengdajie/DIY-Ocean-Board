@@ -1,0 +1,1228 @@
+<!doctype html><meta charset="utf-8"><title>vis</title><body style="margin:0">
+<iframe id="fr" src="../index.html" style="width:1500px;height:950px;border:0"></iframe>
+<pre id="out">running</pre>
+<script>
+var L = [];
+/* 主题色常量 —— UI 从深色改暖白后, 像素断言必须跟着主题走。
+ * 这里集中登记 render.js 里真正用到的颜色, 断言引用常量语义而不是散落魔数,
+ * 下次换主题只改这一处。 */
+var THEME = {
+  bg:        [247, 243, 234],   // --bg      画布/浮层底
+  panel:     [255, 253, 248],   // --panel   视图格底
+  sheet:     [247, 244, 236],   // --sheet   排样板材
+  traceLine: [ 31, 138,  99],   // #1f8a63   描摹轮廓绿(暖白底上要够深才看得清)
+  pocket:    [ 47, 143, 106],   // #2f8f6a   零件详图 pocket 绿
+  part:      [ 47, 107, 176],   // #2f6bb0   零件/板 蓝
+  sel:       [217, 138,  31]    // #d98a1f   选中橙
+};
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+window.onload = function () {
+  setTimeout(function () {
+    var w = document.getElementById('fr').contentWindow, d = w.document;
+    try {
+      var G = w.G;
+      // 用已知参数生成箱体
+      /* 【第 9 轮改架】家具类型 chip 已并入结构配方, 顶部只剩 custom/image 两个。
+       * selectModel('box') 保留了向后兼容: 等价于"配方模式 + 选中箱体柜 + 套推荐尺寸"。 */
+      w.__app.selectModel('box');
+      w.__app.showPane('nest');
+      var st = w.__app.state;
+      var res = w.Render.drawNest(d.getElementById('cvNest'), st.nest, { margin: 10 });
+      chk('drawNest returns tf', !!res && res.sheetTf.length === st.nest.sheets.length, res ? res.sheetTf.length : 'null');
+
+      var cv = d.getElementById('cvNest');
+      var g = cv.getContext('2d');
+      var r = Math.min(2, w.devicePixelRatio || 1);
+      var img = g.getImageData(0, 0, cv.width, cv.height);
+      function px(cssX, cssY) {
+        var x = Math.round(cssX * r), y = Math.round(cssY * r);
+        if (x < 0 || y < 0 || x >= cv.width || y >= cv.height) return null;
+        var i = (y * cv.width + x) * 4;
+        return [img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3]];
+      }
+      function isSheet(c) { return c && c[0] > 230 && c[1] > 225 && c[2] > 210; }   // 米白板材
+      function isPart(c) { return c && c[2] > c[0] + 20 && c[2] > 90; }              // 蓝色零件
+      var tf = res.sheetTf[0], T = tf.T;
+
+      // 1. 板材空白处应是米白色
+      var so = w.__app.sheetOpts();
+      var empty = px(T({ x: so.w - 4, y: so.h - 4 }).x, T({ x: so.w - 4, y: so.h - 4 }).y);
+      chk('sheet background is board color', isSheet(empty), JSON.stringify(empty));
+
+      // 2. 每个零件的几何中心(取轮廓内部一点)应是零件色
+      var hits = 0, miss = [];
+      st.nest.sheets[0].placements.forEach(function (pl) {
+        var q = pl.part.transformed(pl.xf);
+        var b = q.bbox();
+        // 找一个确定在轮廓内、且不在孔内的点
+        var found = null;
+        for (var ty = 0.2; ty <= 0.8 && !found; ty += 0.1) {
+          for (var tx = 0.2; tx <= 0.8 && !found; tx += 0.1) {
+            var cand = { x: b.x0 + b.w * tx, y: b.y0 + b.h * ty };
+            if (!G.pointInPoly(cand, G.flatten(q.outer, 0.5))) continue;
+            var inHole = q.holes.some(function (h) { return G.pointInPoly(cand, G.flatten(h, 0.5)); });
+            if (inHole) continue;
+            found = cand;
+          }
+        }
+        if (!found) { miss.push(pl.name + ':nopoint'); return; }
+        var sc = T(found);
+        var c = px(sc.x, sc.y);
+        if (isPart(c)) hits++; else miss.push(pl.name + ':' + JSON.stringify(c));
+      });
+      chk('every placed part is painted at its interior', miss.length === 0 && hits === st.nest.sheets[0].placements.length,
+        'hits=' + hits + '/' + st.nest.sheets[0].placements.length + ' miss=' + miss.slice(0, 3).join(','));
+
+      // 3. 榫眼(孔)内部应是板材底色 —— 证明 evenodd 挖孔生效
+      var holeOk = 0, holeBad = [];
+      st.nest.sheets[0].placements.forEach(function (pl) {
+        var q = pl.part.transformed(pl.xf);
+        q.holes.forEach(function (h, hi) {
+          var hb = G.loopBBox(h);
+          if (hb.w * tf.scale < 4 || hb.h * tf.scale < 4) return;   // 太小的孔像素上看不出
+          var ctr = { x: hb.cx, y: hb.cy };
+          if (!G.pointInPoly(ctr, G.flatten(h, 0.3))) return;
+          var sc = T(ctr);
+          var c = px(sc.x, sc.y);
+          if (isSheet(c)) holeOk++; else holeBad.push(pl.name + '#' + hi + ':' + JSON.stringify(c));
+        });
+      });
+      chk('mortise holes are cut through (evenodd)', holeBad.length === 0 && holeOk > 0,
+        'ok=' + holeOk + ' bad=' + holeBad.slice(0, 3).join(','));
+
+      // 4. 板材外(留白外侧)不应有零件色
+      var outside = px(T({ x: 2, y: 2 }).x, T({ x: 2, y: 2 }).y);
+      chk('no part inside margin band', !isPart(outside), JSON.stringify(outside));
+
+      // 5. 零件详图: 每个零件格内都应有绘制
+      d.querySelector('.tab[data-pane="parts"]').click();
+      var pres = w.Render.drawParts(d.getElementById('cvParts'), st.result.parts, {});
+      chk('drawParts returns tf', pres && pres.tf.length === st.result.parts.length, pres ? pres.tf.length : 'null');
+      var cv2 = d.getElementById('cvParts'), g2 = cv2.getContext('2d');
+      var img2 = g2.getImageData(0, 0, cv2.width, cv2.height);
+      function px2(cssX, cssY) {
+        var x = Math.round(cssX * r), y = Math.round(cssY * r);
+        if (x < 0 || y < 0 || x >= cv2.width || y >= cv2.height) return null;
+        var i = (y * cv2.width + x) * 4;
+        return [img2.data[i], img2.data[i + 1], img2.data[i + 2], img2.data[i + 3]];
+      }
+      var pmiss = [];
+      pres.tf.forEach(function (o) {
+        var b = o.part.bbox(), found = null;
+        for (var ty = 0.3; ty <= 0.7 && !found; ty += 0.1) {
+          for (var tx = 0.3; tx <= 0.7 && !found; tx += 0.1) {
+            var cand = { x: b.x0 + b.w * tx, y: b.y0 + b.h * ty };
+            if (!G.pointInPoly(cand, G.flatten(o.part.outer, 0.5))) continue;
+            if (o.part.holes.some(function (h) { return G.pointInPoly(cand, G.flatten(h, 0.5)); })) continue;
+            found = cand;
+          }
+        }
+        if (!found) return;
+        var sc = o.T(found), c = px2(sc.x, sc.y);
+        // 详图用半透明蓝填充 + 蓝描边, alpha 必 >0 且偏蓝
+        if (!(c && c[3] > 0 && c[2] >= c[0])) pmiss.push(o.part.name + ':' + JSON.stringify(c));
+      });
+      chk('each part drawn in its cell', pmiss.length === 0, pmiss.slice(0, 3).join(','));
+
+      // 6. 3D 装配: 应有多种明暗面(证明立体感与背面剔除)
+      d.querySelector('.tab[data-pane="asm"]').click();
+      var cv3 = d.getElementById('cvAsm'), g3 = cv3.getContext('2d');
+      var img3 = g3.getImageData(0, 0, cv3.width, cv3.height).data;
+      var shades = {}, lit = 0;
+      for (var i = 0; i < img3.length; i += 4 * 11) {
+        if (img3[i + 3] < 250) continue;
+        var rr = img3[i], gg = img3[i + 1], bb = img3[i + 2];
+        if (rr === 15 && gg === 18 && bb === 22) continue;       // 背景
+        // 木色系: r > g > b
+        if (rr > gg && gg > bb && rr > 60) { lit++; shades[rr + ',' + gg + ',' + bb] = 1; }
+      }
+      chk('3D has wood-toned pixels', lit > 200, lit);
+      chk('3D has multiple face shades', Object.keys(shades).length >= 3, Object.keys(shades).length);
+
+      // 7. 旋转视角后画面应改变
+      var before = g3.getImageData(0, 0, cv3.width, cv3.height).data;
+      w.__app.state.view.asm.ang = 75;
+      w.Render.drawAssembly(cv3, w.Render.boxesFrom(st.result.parts, { t: 15 }),
+        { ang: 75, tilt: 0.55, zoom: 1 });
+      var after = g3.getImageData(0, 0, cv3.width, cv3.height).data;
+      var diff = 0;
+      for (var k = 0; k < before.length; k += 4 * 23) if (before[k] !== after[k]) diff++;
+      chk('3D responds to rotation', diff > 40, diff);
+
+      // 8. 爆炸视图应改变画面
+      var b2 = g3.getImageData(0, 0, cv3.width, cv3.height).data;
+      w.Render.drawAssembly(cv3, w.Render.boxesFrom(st.result.parts, { t: 15 }),
+        { ang: 75, tilt: 0.55, zoom: 1, explode: 0.5 });
+      var a2 = g3.getImageData(0, 0, cv3.width, cv3.height).data;
+      var d2 = 0;
+      for (var k2 = 0; k2 < b2.length; k2 += 4 * 23) if (b2[k2] !== a2[k2]) d2++;
+      chk('3D explode changes view', d2 > 40, d2);
+
+      /* ================= 图片预览: 像素级断言 =================
+       * 图片模式的关键交互是"用户看得见阈值切出了什么", 所以必须验到像素。
+       * 不能只测"函数没报错"。
+       */
+      w.__app.selectModel('image');
+      // 造一张确定的图: 白底 + 居中黑方块(像素坐标 100..200 / 60..140)
+      var tcv = d.createElement('canvas'); tcv.width = 300; tcv.height = 200;
+      var tg = tcv.getContext('2d');
+      tg.fillStyle = '#fff'; tg.fillRect(0, 0, 300, 200);
+      tg.fillStyle = '#000'; tg.fillRect(100, 60, 100, 80);
+      var square = tg.getImageData(0, 0, 300, 200);
+      w.__app.setImode('silhouette');
+      d.getElementById('standStyle').value = 'none';
+      d.getElementById('standStyle').dispatchEvent(new w.Event('change'));
+      d.getElementById('targetWidth').value = 100;
+      d.getElementById('targetHeight').value = 0;
+      d.getElementById('targetWidth').dispatchEvent(new w.Event('change'));
+      w.__app.setImage(square, 'square');
+      w.__app.showPane('img');
+
+      var ist = w.__app.state;
+      chk('图片: 单零件', ist.result.parts.length === 1, ist.result.parts.length);
+      chk('图片: 方块 4 个顶点', ist.result.parts[0].outer.length === 4, ist.result.parts[0].outer.length);
+      chk('图片: 尺寸 100x80mm', Math.abs(ist.result.parts[0].bbox().w - 100) < 1 &&
+        Math.abs(ist.result.parts[0].bbox().h - 80) < 1,
+        G.round(ist.result.parts[0].bbox().w, 2) + 'x' + G.round(ist.result.parts[0].bbox().h, 2));
+      chk('图片: 掩膜 bbox 对应源图方块', ist.image.maskBBox &&
+        Math.abs(ist.image.maskBBox.x0 - 100) <= 1 && Math.abs(ist.image.maskBBox.y0 - 60) <= 1 &&
+        Math.abs(ist.image.maskBBox.w - 100) <= 1 && Math.abs(ist.image.maskBBox.h - 80) <= 1,
+        JSON.stringify(ist.image.maskBBox));
+
+      var icv = d.getElementById('cvImg'), ig = icv.getContext('2d');
+      var ir = Math.min(2, w.devicePixelRatio || 1);
+      function ipx(iimg, cssX, cssY) {
+        var x = Math.round(cssX * ir), y = Math.round(cssY * ir);
+        if (x < 0 || y < 0 || x >= icv.width || y >= icv.height) return null;
+        var i = (y * icv.width + x) * 4;
+        return [iimg.data[i], iimg.data[i + 1], iimg.data[i + 2], iimg.data[i + 3]];
+      }
+
+      // ---- 'image' 模式: 源图原样, 方块中心应是黑, 角落应是白 ----
+      var geo = w.Render.drawMaskPreview(icv, ist.image.data, ist.image.mask, { mode: 'image' });
+      chk('预览返回几何', !!geo && geo.scale > 0, geo ? G.round(geo.scale, 3) : 'null');
+      var im1 = ig.getImageData(0, 0, icv.width, icv.height);
+      // 源图坐标 -> 画布 css 坐标
+      function toCv(sx, sy) { return { x: geo.ox + sx * geo.scale, y: geo.oy + sy * geo.scale }; }
+      var cIn = toCv(150, 100), cOut = toCv(20, 20);
+      var pIn = ipx(im1, cIn.x, cIn.y), pOut = ipx(im1, cOut.x, cOut.y);
+      chk('预览[原图]: 方块内是黑', pIn && pIn[0] < 60 && pIn[1] < 60 && pIn[2] < 60, JSON.stringify(pIn));
+      chk('预览[原图]: 方块外是白', pOut && pOut[0] > 200 && pOut[1] > 200 && pOut[2] > 200, JSON.stringify(pOut));
+
+      // ---- 'mask' 模式: 掩膜=1 画深色(30), =0 画浅色(245) ----
+      w.Render.drawMaskPreview(icv, ist.image.data, ist.image.mask, { mode: 'mask' });
+      var im2 = ig.getImageData(0, 0, icv.width, icv.height);
+      var mIn = ipx(im2, cIn.x, cIn.y), mOut = ipx(im2, cOut.x, cOut.y);
+      chk('预览[掩膜]: 内部深色', mIn && mIn[0] < 70, JSON.stringify(mIn));
+      chk('预览[掩膜]: 外部浅色', mOut && mOut[0] > 200, JSON.stringify(mOut));
+
+      // ---- 'overlay' 模式: 方块内应带蓝色叠加(b 明显 > r) ----
+      w.Render.drawMaskPreview(icv, ist.image.data, ist.image.mask, { mode: 'overlay' });
+      var im3 = ig.getImageData(0, 0, icv.width, icv.height);
+      var oIn = ipx(im3, cIn.x, cIn.y), oOut = ipx(im3, cOut.x, cOut.y);
+      chk('预览[叠加]: 内部偏蓝', oIn && oIn[2] > oIn[0] + 25, JSON.stringify(oIn));
+      chk('预览[叠加]: 外部不偏蓝', oOut && oOut[2] <= oOut[0] + 12, JSON.stringify(oOut));
+
+      // ---- 轮廓叠加: 绿色描边应落在掩膜 bbox 的边界上 ----
+      w.Render.drawMaskPreview(icv, ist.image.data, ist.image.mask, {
+        mode: 'overlay', parts: ist.result.parts, traceRect: ist.image.maskBBox
+      });
+      var im4 = ig.getImageData(0, 0, icv.width, icv.height);
+      /* 描摸轮廓绿(THEME.traceLine = #1f8a63)会与蓝色掩膜叠加抗锯齿混合
+       * (实测 31,131,99), 所以判据不能钉死绝对亮度——只要求"绿通道占主导且远高于红"。
+       * 阈值从主题常量推导: 混合后 g 至少不会低于原色 g 的 60%。 */
+      var GMIN = THEME.traceLine[1] * 0.6;
+      function isGreen(c) { return c && c[1] > GMIN && c[1] > c[0] + 50 && c[1] > c[2] + 20; }
+      function hasGreenNear(sx, sy, rad) {
+        var c0 = toCv(sx, sy);
+        for (var dy = -rad; dy <= rad; dy++) {
+          for (var dx = -rad; dx <= rad; dx++) {
+            if (isGreen(ipx(im4, c0.x + dx, c0.y + dy))) return true;
+          }
+        }
+        return false;
+      }
+      chk('轮廓叠加: 上边有绿线', hasGreenNear(150, 60, 5));
+      chk('轮廓叠加: 下边有绿线', hasGreenNear(150, 140, 5));
+      chk('轮廓叠加: 左边有绿线', hasGreenNear(100, 100, 5));
+      chk('轮廓叠加: 右边有绿线', hasGreenNear(200, 100, 5));
+      chk('轮廓叠加: 方块中心无绿线', !hasGreenNear(150, 100, 3));
+      chk('轮廓叠加: 远处背景无绿线', !hasGreenNear(30, 30, 4));
+
+      // ---- 带孔形状: 孔的轮廓也要画出来 ----
+      var hcv = d.createElement('canvas'); hcv.width = 200; hcv.height = 200;
+      var hg = hcv.getContext('2d');
+      hg.fillStyle = '#fff'; hg.fillRect(0, 0, 200, 200);
+      hg.fillStyle = '#000'; hg.fillRect(40, 40, 120, 120);
+      hg.fillStyle = '#fff'; hg.fillRect(80, 80, 40, 40);
+      w.__app.setImage(hg.getImageData(0, 0, 200, 200), 'holed');
+      var hst = w.__app.state;
+      chk('带孔图: 1 件 1 孔', hst.result.parts.length === 1 && hst.result.parts[0].holes.length === 1,
+        hst.result.parts.length + '/' + (hst.result.parts[0] ? hst.result.parts[0].holes.length : 0));
+      var geo2 = w.Render.drawMaskPreview(icv, hst.image.data, hst.image.mask, {
+        mode: 'overlay', parts: hst.result.parts, traceRect: hst.image.maskBBox
+      });
+      var im5 = ig.getImageData(0, 0, icv.width, icv.height);
+      function green2(sx, sy, rad) {
+        for (var dy = -rad; dy <= rad; dy++) {
+          for (var dx = -rad; dx <= rad; dx++) {
+            var x = Math.round((geo2.ox + sx * geo2.scale + dx) * ir), y = Math.round((geo2.oy + sy * geo2.scale + dy) * ir);
+            if (x < 0 || y < 0 || x >= icv.width || y >= icv.height) continue;
+            var i = (y * icv.width + x) * 4;
+            if (isGreen([im5.data[i], im5.data[i + 1], im5.data[i + 2]])) return true;
+          }
+        }
+        return false;
+      }
+      chk('带孔图: 孔的上边有绿线', green2(100, 80, 5));
+      chk('带孔图: 孔的左边有绿线', green2(80, 100, 5));
+      chk('带孔图: 孔中心无绿线', !green2(100, 100, 3));
+
+      // ---- 空图片: 应画提示文字而不是崩 ----
+      var ecv = d.createElement('canvas'); ecv.width = 400; ecv.height = 200;
+      var eres = w.Render.drawMaskPreview(ecv, null, null, { emptyText: 'NOIMAGE' });
+      chk('空图预览返回 null', eres === null);
+      var eg = ecv.getContext('2d').getImageData(0, 0, ecv.width, ecv.height).data;
+      var textPx = 0;
+      for (var ei = 0; ei < eg.length; ei += 4) if (eg[ei] > 90) textPx++;
+      chk('空图预览画了提示文字', textPx > 30, textPx);
+
+      // ---- 分层模式预览也要能画 ----
+      w.__app.setImode('layers');
+      var lcv = d.createElement('canvas'); lcv.width = 240; lcv.height = 240;
+      var lg = lcv.getContext('2d');
+      lg.fillStyle = '#fff'; lg.fillRect(0, 0, 240, 240);
+      [['#d0d0d0', 100], ['#909090', 70], ['#404040', 40], ['#000', 18]].forEach(function (lv) {
+        lg.fillStyle = lv[0]; lg.beginPath(); lg.arc(120, 120, lv[1], 0, 7); lg.fill();
+      });
+      w.__app.setImage(lg.getImageData(0, 0, 240, 240), 'ramp');
+      chk('分层: 生成多层', w.__app.state.result.parts.length >= 4, w.__app.state.result.parts.length);
+      w.Render.drawMaskPreview(icv, w.__app.state.image.data, w.__app.state.image.mask, { mode: 'overlay' });
+      var im6 = ig.getImageData(0, 0, icv.width, icv.height);
+      var blueish = 0;
+      for (var bi = 0; bi < im6.data.length; bi += 4 * 13) {
+        if (im6.data[bi + 2] > im6.data[bi] + 25 && im6.data[bi + 3] > 250) blueish++;
+      }
+      chk('分层预览有掩膜叠加', blueish > 30, blueish);
+
+      /* ================= 自定义(重构版)渲染 ================= */
+      // ---- A. 清单模式: pocket 虚线绿 + 纹理平行线 ----
+      w.__app.selectModel('custom');
+      w.__app.setCmode('list');
+      var cst = w.__app.state;
+      cst.rows = [
+        { name: '带槽面板', len: 600, wid: 400, qty: 1, grain: 'long',
+          pockets: [{ ref: 'center', x: 0, y: 0, w: 300, h: 120, depth: 6 }] }
+      ];
+      w.__app.generate();
+      chk('清单模式出 1 件带 pocket', cst.result.parts.length === 1 && cst.result.parts[0].pockets.length === 1,
+        cst.result.parts.length + '/' + (cst.result.parts[0] ? cst.result.parts[0].pockets.length : 0));
+
+      d.querySelector('.tab[data-pane="nest"]').click();
+      var ncv = d.getElementById('cvNest');
+      var nres = w.Render.drawNest(ncv, cst.nest, { margin: 10 });
+      var ng = ncv.getContext('2d');
+      var nim = ng.getImageData(0, 0, ncv.width, ncv.height);
+      function npx(cssX, cssY) {
+        var x = Math.round(cssX * r), y = Math.round(cssY * r);
+        if (x < 0 || y < 0 || x >= ncv.width || y >= ncv.height) return null;
+        var i = (y * ncv.width + x) * 4;
+        return [nim.data[i], nim.data[i + 1], nim.data[i + 2], nim.data[i + 3]];
+      }
+      // pocket 填充 rgba(18,160,106,.18) 叠在零件蓝上 => 绿通道要明显抬起来
+      function isPocketGreen(c) { return c && c[1] > c[0] + 18 && c[1] > 70 && c[2] < c[1] + 40; }
+      var ntf = nres.sheetTf[0], NT = ntf.T;
+      var pl0 = cst.nest.sheets[0].placements[0];
+      var q0 = pl0.part.transformed(pl0.xf);
+      var pkb = G.loopBBox(q0.pockets[0].loop);
+      var pkc = NT({ x: pkb.cx, y: pkb.cy });
+      chk('排样图: pocket 内部呈绿色调(与切透孔区分)', isPocketGreen(npx(pkc.x, pkc.y)), JSON.stringify(npx(pkc.x, pkc.y)));
+      // pocket 边界必须是虚线 => 沿 pocket 上边扫一圈, 应既有绿描边像素也有间隙
+      var dashOn = 0, dashOff = 0;
+      for (var dxk = 2; dxk < pkb.w - 2; dxk += 1) {
+        var sp = NT({ x: pkb.x0 + dxk, y: pkb.y1 });
+        var cc = npx(sp.x, sp.y);
+        if (cc && cc[1] > c0g(cc)) dashOn++; else dashOff++;
+      }
+      function c0g(c) { return Math.max(c[0], c[2]) + 10; }
+      chk('排样图: pocket 边界是虚线(有画有断)', dashOn > 3 && dashOff > 3, 'on=' + dashOn + ' off=' + dashOff);
+      // pocket 中心不能被当成孔挖穿(不能是板材底色)
+      function isSheetC(c) { return c && c[0] > 230 && c[1] > 225 && c[2] > 210; }
+      chk('排样图: pocket 未被挖穿', !isSheetC(npx(pkc.x, pkc.y)), JSON.stringify(npx(pkc.x, pkc.y)));
+
+      // 纹理平行线: grain=long 且 rot=0 => 画水平线; 沿零件内部一条竖线扫, 应出现明暗交替
+      chk('排样图: 纹理线为水平(grain=long, rot=0)', (function () {
+        if (pl0.rot !== 0) return false;
+        var qb = q0.bbox();
+        var xMid = qb.x0 + qb.w * 0.12;                  // 避开 pocket 与文字
+        var vals = [], yk;
+        for (yk = qb.y0 + 4; yk < qb.y1 - 4; yk += 1) {
+          var sp2 = NT({ x: xMid, y: yk });
+          var c2 = npx(sp2.x, sp2.y);
+          if (c2) vals.push(c2[2] - c2[0]);              // 蓝-红: 纹理线更深更蓝
+        }
+        var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+        // 竖向扫过水平纹理线 => 必有交替; 记录跨中值的次数
+        var mid = (mn + mx) / 2, cross = 0;
+        for (yk = 1; yk < vals.length; yk++) if ((vals[yk - 1] - mid) * (vals[yk] - mid) < 0) cross++;
+        return cross >= 4;
+      })(), 'rot=' + pl0.rot);
+      chk('排样图: 纹理线只在竖向变化(水平方向平滑)', (function () {
+        var qb = q0.bbox();
+        var yMid = qb.y0 + qb.h * 0.1;
+        var vals = [], xk;
+        for (xk = qb.x0 + 6; xk < qb.x0 + qb.w * 0.4; xk += 1) {
+          var sp3 = NT({ x: xk, y: yMid });
+          var c3 = npx(sp3.x, sp3.y);
+          if (c3) vals.push(c3[2] - c3[0]);
+        }
+        var mid2 = (Math.min.apply(null, vals) + Math.max.apply(null, vals)) / 2, cr = 0;
+        for (xk = 1; xk < vals.length; xk++) if ((vals[xk - 1] - mid2) * (vals[xk] - mid2) < 0) cr++;
+        return cr <= 2;
+      })());
+
+      // ---- B. 零件详图: pocket 虚线 + 深度文字 ----
+      d.querySelector('.tab[data-pane="parts"]').click();
+      var pcv2 = d.getElementById('cvParts');
+      w.Render.drawParts(pcv2, cst.result.parts, {});
+      var pg2 = pcv2.getContext('2d');
+      var pim = pg2.getImageData(0, 0, pcv2.width, pcv2.height).data;
+      var greenish = 0;
+      for (var gi = 0; gi < pim.length; gi += 4) {
+        if (pim[gi + 3] > 40 && pim[gi + 1] > 110 && pim[gi + 1] > pim[gi] + 40) greenish++;
+      }
+      chk('零件详图: pocket 用绿色标出', greenish > 60, greenish);
+
+      // ---- C. 板位表三视图 ----
+      w.__app.setCmode('recipe');
+      (function () {
+        var rke = d.getElementById('recipeKey');
+        rke.value = 'grid';
+        rke.dispatchEvent(new w.Event('change'));   // 必须派 change: state.recipe 靠它同步
+      })();
+      w.__app.showPane('edit');
+      var plc = d.getElementById('cvPlan');
+      var pnl = w.__app.panelsOf(w.__app.readParams());
+      chk('三视图: 配方展开出板位', pnl.length >= 6, pnl.length);
+      var plr = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+      chk('三视图: 返回 3 个视图', plr && plr.views.length === 3, plr ? plr.views.length : 'null');
+      var plg = plc.getContext('2d');
+      var plim = plg.getImageData(0, 0, plc.width, plc.height);
+      function plpx(cssX, cssY) {
+        var x = Math.round(cssX * r), y = Math.round(cssY * r);
+        if (x < 0 || y < 0 || x >= plc.width || y >= plc.height) return null;
+        var i = (y * plc.width + x) * 4;
+        return [plim.data[i], plim.data[i + 1], plim.data[i + 2], plim.data[i + 3]];
+      }
+      // 每个视图区域都必须有蓝色板像素(不能有空视图)
+      var viewEmpty = [];
+      plr.views.forEach(function (V) {
+        var blue = 0;
+        V.rects.forEach(function (rc) {
+          var c = plpx(rc.x + rc.w / 2, rc.y + rc.h / 2);
+          if (c && c[3] > 0 && c[2] > c[0]) blue++;
+        });
+        if (blue < V.rects.length * 0.8) viewEmpty.push(V.key + ':' + blue + '/' + V.rects.length);
+      });
+      chk('三视图: 三个视图都画满了板', viewEmpty.length === 0, viewEmpty.join(','));
+      /* 板面正对视图 = 浅(半透明 .14), 看到板厚侧面 = 实心(.42)。
+       *
+       * 三个易踩的坑, 都写在这里:
+       * 1) 暗色主题时"实心"= 蓝通道更高(蓝贴在黑底上); 改成暖白底后
+       *    "实心"反而更暗。所以不能比亮度, 要比"蓝味"(b - r):
+       *    不管底色深浅, 越实心的蓝就越偏蓝。
+       * 2) 不能在真实柜体上采样——三视图里板与板大量重叠(侧视里整张
+       *    侧板盖在所有层板上面), 半透明叠加后采到的是混合色, 永远洗不出单一因素。
+       * 3) 所以这里另搭一个**两块板且在俯视里不重叠**的最小场景,
+       *    才能干净地验证"面 vs 边"两种填色确实不同。 */
+      chk('三视图: 侧面(板厚)比正面(板面)更实心', (function () {
+        var pc2 = d.createElement('canvas'); pc2.width = 760; pc2.height = 300;
+        var demo = [
+          // 俯视里: 一张水平层板 = 正面服众(faceOn), 投影成大矩形
+          { id: 'F', name: 'face', plane: 'XY', at: 100, u0: 0, u1: 200, v0: 0, v1: 200 },
+          // 俯视里: 一张竖板 = 只看到板厚(edge), 投影成细条; x=500 远离前者不重叠
+          { id: 'E', name: 'edge', plane: 'YZ', at: 500, u0: 0, u1: 200, v0: 0, v1: 200 }
+        ];
+        var dr = w.Render.drawPlan(pc2, demo, { thickness: 18 });
+        var dg = pc2.getContext('2d').getImageData(0, 0, pc2.width, pc2.height).data;
+        var tv = dr.views.filter(function (V) { return V.key === 'top'; })[0];
+        if (!tv) return false;
+        function bl(id) {
+          var rc = tv.rects.filter(function (o) { return o.panel.id === id; })[0];
+          if (!rc) return null;
+          var X = Math.round((rc.x + rc.w / 2) * r), Y = Math.round((rc.y + rc.h / 2) * r);
+          var i = (Y * pc2.width + X) * 4;
+          return dg[i + 2] - dg[i];         // blueness
+        }
+        var bF = bl('F'), bE = bl('E');
+        chk('三视图[最小场景]: 两块板都投影到了', bF !== null && bE !== null, bF + '/' + bE);
+        return bF !== null && bE !== null && bE > bF + 15;
+      })());
+      /* 暖白主题: 视图格底色必须是 THEME.panel(#fffdf8), 而不是旧深色主题的 #12161b。
+       * 全图统计"恰好等于暖白"的像素应占大头, 且几乎没有深色像素。 */
+      chk('三视图: 格底是暖白(THEME.panel)', (function () {
+        var warm = 0, dark = 0;
+        for (var wi = 0; wi < plim.data.length; wi += 4) {
+          if (plim.data[wi + 3] < 200) continue;
+          if (plim.data[wi] === THEME.panel[0] && plim.data[wi + 1] === THEME.panel[1] &&
+              plim.data[wi + 2] === THEME.panel[2]) warm++;
+          if (plim.data[wi] < 60 && plim.data[wi + 1] < 60 && plim.data[wi + 2] < 60) dark++;
+        }
+        chk('三视图: 几乎没有深色像素(已脱离暗色主题)', dark < warm / 50, 'warm=' + warm + ' dark=' + dark);
+        return warm > 20000;
+      })());
+      // 选中板必须呈橙色
+      var selId = pnl[0].id;
+      var plr2 = w.Render.drawPlan(plc, pnl, { thickness: 15, selected: selId });
+      var plim2 = plg.getImageData(0, 0, plc.width, plc.height).data;
+      var orange = 0;
+      for (var oi = 0; oi < plim2.length; oi += 4) {
+        if (plim2[oi + 3] > 60 && plim2[oi] > 180 && plim2[oi + 1] > 100 && plim2[oi + 1] < 210 && plim2[oi + 2] < 130) orange++;
+      }
+      chk('三视图: 选中板高亮为橙色', orange > 40, orange);
+      chk('三视图: 未选中时无橙色高亮', (function () {
+        w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var d3 = plg.getImageData(0, 0, plc.width, plc.height).data, o3 = 0;
+        for (var i3 = 0; i3 < d3.length; i3 += 4) {
+          if (d3[i3 + 3] > 60 && d3[i3] > 180 && d3[i3 + 1] > 100 && d3[i3 + 1] < 210 && d3[i3 + 2] < 130) o3++;
+        }
+        return o3 < orange / 4;
+      })());
+      // 点击命中 -> 选中该板并重绘出橙色
+      chk('三视图: 点击可选中板(命中测试与绘制一致)', (function () {
+        var plr3 = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var rc0 = plr3.views[0].rects[plr3.views[0].rects.length - 1];
+        var got = plr3.hit(rc0.x + rc0.w / 2, rc0.y + rc0.h / 2);
+        return !!got && !!got.id;
+      })());
+      /* ---- \u4e09\u89c6\u56fe\u62d6\u62fd\u7684\u51e0\u4f55\u5730\u57fa: \u5c4f\u5e55<->\u4e16\u754c\u53cd\u53d8\u6362 ---- */
+      chk('\u4e09\u89c6\u56fe: \u6bcf\u4e2a\u89c6\u56fe\u90fd\u62a5\u4e86\u8f74/\u683c\u5b50\u8303\u56f4', (function () {
+        var plr4 = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        return plr4.views.every(function (V) {
+          return typeof V.h === 'string' && typeof V.v === 'string' &&
+            isFinite(V.gx) && isFinite(V.gy) && V.cw > 0 && V.ch > 0 &&
+            typeof V.toWorld === 'function' && typeof V.toScreen === 'function';
+        });
+      })());
+      chk('\u4e09\u89c6\u56fe: toWorld \u662f toScreen \u7684\u9006(\u62d6\u62fd\u7684\u5730\u57fa)', (function () {
+        var plr4 = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var worst = 0;
+        plr4.views.forEach(function (V) {
+          [[0, 0], [123.4, -56.7], [600, 720]].forEach(function (q) {
+            var sc = V.toScreen(q[0], q[1]);
+            var wl = V.toWorld(sc.x, sc.y);
+            worst = Math.max(worst, Math.abs(wl.h - q[0]), Math.abs(wl.v - q[1]));
+          });
+        });
+        chk('\u4e09\u89c6\u56fe: \u53cd\u53d8\u6362\u8bef\u5dee < 1e-9', worst < 1e-9, worst);
+        return worst < 1e-9;
+      })());
+      chk('\u4e09\u89c6\u56fe: viewAt \u80fd\u5206\u8fa8\u4e09\u4e2a\u683c, \u683c\u5916\u8fd4\u56de null', (function () {
+        var plr4 = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var hits = plr4.views.map(function (V) {
+          var got = plr4.viewAt(V.gx + V.cw / 2, V.gy + V.ch / 2);
+          return got ? got.key : 'null';
+        }).join(',');
+        chk('\u4e09\u89c6\u56fe: \u683c\u4e2d\u5fc3\u547d\u4e2d\u81ea\u5df1', hits === 'front,top,side', hits);
+        return plr4.viewAt(-50, -50) === null && hits === 'front,top,side';
+      })());
+      chk('\u4e09\u89c6\u56fe: pick \u540c\u65f6\u8fd4\u56de\u89c6\u56fe\u4e0e\u677f', (function () {
+        var plr4 = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var V0 = plr4.views[0], rc = V0.rects[V0.rects.length - 1];
+        var got = plr4.pick(rc.x + rc.w / 2, rc.y + rc.h / 2);
+        chk('\u4e09\u89c6\u56fe: pick \u7a7a\u767d\u5904\u677f\u4e3a null \u4f46\u89c6\u56fe\u4e0d\u4e3a null',
+          (function () { var p = plr4.pick(V0.gx + 3, V0.gy + V0.ch - 3); return p && p.view && p.panel === null; })());
+        return got && got.view && got.view.key === V0.key && got.panel && got.panel.id === rc.panel.id;
+      })());
+      /* \u591a\u9009: selected \u63a5\u53d7\u6570\u7ec4, \u6a59\u8272\u9762\u79ef\u5e94\u968f\u9009\u4e2d\u6570\u5355\u8c03\u589e\u957f\u3002
+       * \u65e7\u63a5\u53e3\u53ea\u63a5\u5355\u4e2a id, \u4e0d\u517c\u5bb9\u5c31\u4f1a\u4e00\u5757\u4e5f\u4e0d\u9ad8\u4eae\u3002 */
+      chk('\u4e09\u89c6\u56fe: selected \u63a5\u6570\u7ec4(\u591a\u9009) \u4e14\u6a59\u8272\u9762\u79ef\u9012\u589e', (function () {
+        function orangeOf(selArg) {
+          w.Render.drawPlan(plc, pnl, { thickness: 15, selected: selArg });
+          var dd = plg.getImageData(0, 0, plc.width, plc.height).data, n = 0;
+          for (var i = 0; i < dd.length; i += 4) {
+            if (dd[i + 3] > 60 && dd[i] > 180 && dd[i + 1] > 100 && dd[i + 1] < 210 && dd[i + 2] < 130) n++;
+          }
+          return n;
+        }
+        var o0 = orangeOf([]);
+        var o1 = orangeOf([pnl[0].id]);
+        var o2 = orangeOf([pnl[0].id, pnl[1].id]);
+        var o3 = orangeOf([pnl[0].id, pnl[1].id, pnl[2].id]);
+        chk('\u4e09\u89c6\u56fe: \u591a\u9009\u9012\u589e ' + [o0, o1, o2, o3].join('<'), o0 < o1 && o1 < o2 && o2 < o3);
+        chk('\u4e09\u89c6\u56fe: \u5355\u4e2a id \u4e0e\u5355\u5143\u7d20\u6570\u7ec4\u7ed3\u679c\u4e00\u81f4',
+          Math.abs(orangeOf(pnl[0].id) - o1) <= 2, orangeOf(pnl[0].id) + ' vs ' + o1);
+        return o0 < o1 && o1 < o2 && o2 < o3;
+      })());
+      chk('\u4e09\u89c6\u56fe: \u591a\u9009\u65f6\u4e0d\u6807\u677f\u540d(\u5426\u5219\u7cca\u6210\u4e00\u56e2)', (function () {
+        /* \u5355\u9009\u65f6\u4f1a\u5728\u77e9\u5f62\u4e0a\u65b9\u5199\u540d\u5b57 -> \u6a59\u8272\u6df1\u8272\u6587\u5b57\u50cf\u7d20;
+         * \u591a\u9009\u65f6\u4e0d\u5199 -> \u6df1\u6a59(\u6587\u5b57\u8272 #a5620c)\u50cf\u7d20\u5e94\u660e\u663e\u53d8\u5c11\u3002 */
+        function inkOf(selArg) {
+          w.Render.drawPlan(plc, pnl, { thickness: 15, selected: selArg });
+          var dd = plg.getImageData(0, 0, plc.width, plc.height).data, n = 0;
+          for (var i = 0; i < dd.length; i += 4) {
+            if (dd[i + 3] > 200 && dd[i] > 130 && dd[i] < 200 && dd[i + 1] < 130 && dd[i + 2] < 60) n++;
+          }
+          return n;
+        }
+        var one = inkOf([pnl[0].id]);
+        var two = inkOf([pnl[0].id, pnl[1].id]);
+        return two < one;
+      })());
+      /* \u60ac\u505c\u9ad8\u4eae: \u6bd4\u9009\u4e2d\u6d45\u3001\u6bd4\u672a\u9009\u6df1 */
+      chk('\u4e09\u89c6\u56fe: hover \u9ad8\u4eae\u4ecb\u4e8e\u672a\u9009\u4e0e\u9009\u4e2d\u4e4b\u95f4', (function () {
+        function orangeOf(o) {
+          w.Render.drawPlan(plc, pnl, o);
+          var dd = plg.getImageData(0, 0, plc.width, plc.height).data, n = 0;
+          for (var i = 0; i < dd.length; i += 4) {
+            if (dd[i + 3] > 60 && dd[i] > 170 && dd[i + 1] > 90 && dd[i + 2] < 160 && dd[i + 2] < dd[i] - 40) n++;
+          }
+          return n;
+        }
+        var none = orangeOf({ thickness: 15 });
+        var hov = orangeOf({ thickness: 15, hover: pnl[0].id });
+        var sel = orangeOf({ thickness: 15, selected: [pnl[0].id] });
+        chk('\u4e09\u89c6\u56fe: hover \u50cf\u7d20 ' + none + ' < ' + hov, none < hov);
+        return none < hov && hov <= sel + 60;
+      })());
+      /* \u5438\u9644\u53c2\u8003\u7ebf: \u53ea\u80fd\u51fa\u73b0\u5728\u8be5\u8f74\u53ef\u89c1\u7684\u89c6\u56fe\u91cc\u3002
+       * z \u8f74\u7684\u53c2\u8003\u7ebf: front(x-z) \u4e0e side(y-z) \u91cc\u662f\u6a2a\u7ebf, top(x-y) \u91cc\u6839\u672c\u4e0d\u5e94\u8be5\u51fa\u73b0\u3002 */
+      chk('\u4e09\u89c6\u56fe: \u5438\u9644\u53c2\u8003\u7ebf\u53ea\u753b\u5728\u76f8\u5173\u89c6\u56fe', (function () {
+        var base = w.Render.drawPlan(plc, pnl, { thickness: 15 });
+        var b0 = plg.getImageData(0, 0, plc.width, plc.height).data;
+        var vz = 360;
+        var gr = w.Render.drawPlan(plc, pnl, {
+          thickness: 15, guides: [{ axis: 'z', v: vz, kind: 'edge', label: 'GUIDE' }]
+        });
+        var b1 = plg.getImageData(0, 0, plc.width, plc.height).data;
+        function diffIn(V) {
+          var n = 0;
+          var x0 = Math.round(V.gx * r), x1 = Math.round((V.gx + V.cw) * r);
+          var y0 = Math.round(V.gy * r), y1 = Math.round((V.gy + V.ch) * r);
+          for (var y = y0; y < y1; y++) {
+            for (var x = x0; x < x1; x++) {
+              var i = (y * plc.width + x) * 4;
+              if (b0[i] !== b1[i] || b0[i + 1] !== b1[i + 1] || b0[i + 2] !== b1[i + 2]) n++;
+            }
+          }
+          return n;
+        }
+        var byKey = {};
+        gr.views.forEach(function (V) { byKey[V.key] = diffIn(V); });
+        chk('\u4e09\u89c6\u56fe: z \u53c2\u8003\u7ebf\u5728 front/side \u91cc\u53ef\u89c1', byKey.front > 100 && byKey.side > 100, JSON.stringify(byKey));
+        chk('\u4e09\u89c6\u56fe: z \u53c2\u8003\u7ebf\u4e0d\u6c61\u67d3 top \u89c6\u56fe', byKey.top === 0, byKey.top);
+        /* \u53c2\u8003\u7ebf\u5fc5\u987b\u843d\u5728 z=360 \u5bf9\u5e94\u7684\u5c4f\u5e55 y \u4e0a(\u00b12px), \u5426\u5219\u7528\u6237\u770b\u5230\u7684\u7ebf\u548c\u5b9e\u9645\u5438\u9644\u4f4d\u7f6e\u4e0d\u4e00\u81f4 */
+        var fv = gr.views.filter(function (V) { return V.key === 'front'; })[0];
+        var wantY = Math.round(fv.toScreen(0, vz).y * r);
+        var rowHit = 0, bestRow = -1, bestN = -1;
+        for (var yy = Math.round(fv.gy * r) + 2; yy < Math.round((fv.gy + fv.ch) * r) - 2; yy++) {
+          var n2 = 0;
+          for (var xx = Math.round(fv.gx * r) + 2; xx < Math.round((fv.gx + fv.cw) * r) - 2; xx++) {
+            var i2 = (yy * plc.width + xx) * 4;
+            if (b0[i2] !== b1[i2] || b0[i2 + 1] !== b1[i2 + 1] || b0[i2 + 2] !== b1[i2 + 2]) n2++;
+          }
+          if (n2 > bestN) { bestN = n2; bestRow = yy; }
+        }
+        chk('\u4e09\u89c6\u56fe: \u53c2\u8003\u7ebf y \u4f4d\u7f6e\u4e0e z=360 \u4e00\u81f4', Math.abs(bestRow - wantY) <= 2 * r, 'row=' + bestRow + ' want=' + wantY);
+        /* \u7ebf\u578b\u533a\u5206: edge(\u6a59) vs center(\u7eff) \u989c\u8272\u4e0d\u540c */
+        var grC = w.Render.drawPlan(plc, pnl, { thickness: 15, guides: [{ axis: 'z', v: vz, kind: 'center', label: 'C' }] });
+        var b2 = plg.getImageData(0, 0, plc.width, plc.height).data;
+        var diff2 = 0;
+        for (var i3 = 0; i3 < b1.length; i3 += 4) if (b1[i3] !== b2[i3] || b1[i3 + 1] !== b2[i3 + 1]) diff2++;
+        chk('\u4e09\u89c6\u56fe: edge/center \u53c2\u8003\u7ebf\u989c\u8272\u4e0d\u540c', diff2 > 50, diff2);
+        chk('\u4e09\u89c6\u56fe: \u672a\u77e5\u8f74\u7684\u53c2\u8003\u7ebf\u88ab\u5ffd\u7565(\u4e0d\u5d29)', (function () {
+          w.Render.drawPlan(plc, pnl, { thickness: 15, guides: [{ axis: 'q', v: 1, kind: 'edge', label: 'X' }] });
+          var b3 = plg.getImageData(0, 0, plc.width, plc.height).data, n3 = 0;
+          for (var i4 = 0; i4 < b0.length; i4 += 4) if (b0[i4] !== b3[i4]) n3++;
+          return n3 === 0;
+        })());
+        return byKey.top === 0 && byKey.front > 100;
+      })());
+      /* \u56fe\u5143\u4e0d\u80fd\u6ea2\u51fa\u683c\u5b50: \u62d6\u5230\u8fdc\u5904\u7684\u677f\u4f1a\u628a\u77e9\u5f62\u753b\u5230\u9694\u58c1\u89c6\u56fe\u91cc,
+       * \u770b\u8d77\u6765\u5c31\u50cf"\u4fef\u89c6\u91cc\u51ed\u7a7a\u591a\u4e86\u4e00\u5757\u677f" \u2014\u2014 \u5fc5\u987b\u88ab clip \u6398\u6389\u3002 */
+      chk('\u4e09\u89c6\u56fe: \u8d85\u51fa\u683c\u5b50\u7684\u5185\u5bb9\u88ab\u88c1\u526a', (function () {
+        var far = pnl.map(function (p) { return JSON.parse(JSON.stringify(p)); });
+        var pcv3 = d.createElement('canvas'); pcv3.width = 1400; pcv3.height = 420;
+        var dr3 = w.Render.drawPlan(pcv3, far, { thickness: 15, zoom: 4.5 });
+        var dg3 = pcv3.getContext('2d').getImageData(0, 0, pcv3.width, pcv3.height).data;
+        /* \u683c\u4e0e\u683c\u4e4b\u95f4\u7684\u7f1d(gap=14px) \u4e2d\u5fc3\u5217\u5e94\u8be5\u662f\u9875\u9762\u5e95\u8272/\u900f\u660e, \u4e0d\u80fd\u6709\u84dd\u8272\u677f */
+        var v0 = dr3.views[0], v1 = dr3.views[1];
+        var seamX = Math.round(((v0.gx + v0.cw + v1.gx) / 2) * r);
+        var bad = 0;
+        for (var y = 0; y < pcv3.height; y++) {
+          var i = (y * pcv3.width + seamX) * 4;
+          if (dg3[i + 3] > 60 && dg3[i + 2] > dg3[i] + 20) bad++;
+        }
+        return bad === 0;
+      })());
+      // 空板位表 -> 画提示文字不崩
+      var ecv2 = d.createElement('canvas'); ecv2.width = 600; ecv2.height = 300;
+      chk('三视图: 空板位表返回 null', w.Render.drawPlan(ecv2, [], { thickness: 15, emptyText: 'EMPTYPLAN' }) === null);
+      var eg2 = ecv2.getContext('2d').getImageData(0, 0, ecv2.width, ecv2.height).data;
+      var tp2 = 0;
+      for (var ti = 0; ti < eg2.length; ti += 4) if (eg2[ti + 3] > 60) tp2++;
+      chk('三视图: 空板位表画了提示文字', tp2 > 20, tp2);
+
+      // ---- D. 洞洞板: 大量孔必须都被挖穿 ----
+      w.__app.setCmode('list');
+      cst.rows = [{ name: '洞洞板', len: 600, wid: 400, qty: 1, grain: 'long',
+        pegboard: { dia: 14, pitch: 60, margin: 40 } }];
+      w.__app.generate();
+      chk('洞洞板出孔', cst.result.parts[0].holes.length >= 20, cst.result.parts[0].holes.length);
+      d.querySelector('.tab[data-pane="nest"]').click();
+      var pbres = w.Render.drawNest(ncv, cst.nest, { margin: 10 });
+      var pbim = ncv.getContext('2d').getImageData(0, 0, ncv.width, ncv.height);
+      function pbpx(cssX, cssY) {
+        var x = Math.round(cssX * r), y = Math.round(cssY * r);
+        if (x < 0 || y < 0 || x >= ncv.width || y >= ncv.height) return null;
+        var i = (y * ncv.width + x) * 4;
+        return [pbim.data[i], pbim.data[i + 1], pbim.data[i + 2], pbim.data[i + 3]];
+      }
+      var pbtf = pbres.sheetTf[0], PBT = pbtf.T;
+      var pl1 = cst.nest.sheets[0].placements[0];
+      var q1 = pl1.part.transformed(pl1.xf);
+      var pegOk = 0, pegBad = 0;
+      q1.holes.forEach(function (h) {
+        var hb = G.loopBBox(h);
+        if (hb.w * pbtf.scale < 4) return;
+        var sc = PBT({ x: hb.cx, y: hb.cy });
+        if (isSheetC(pbpx(sc.x, sc.y))) pegOk++; else pegBad++;
+      });
+      var pegDbg = [];
+      q1.holes.forEach(function (h) {
+        var hb = G.loopBBox(h);
+        if (hb.w * pbtf.scale < 4) return;
+        var sc = PBT({ x: hb.cx, y: hb.cy });
+        var cc = pbpx(sc.x, sc.y);
+        if (!isSheetC(cc)) pegDbg.push(G.round(hb.cx, 0) + ',' + G.round(hb.cy, 0) + '=' + JSON.stringify(cc));
+      });
+      chk('洞洞板: 每个孔都真的挖穿了', pegBad === 0 && pegOk >= 15, 'ok=' + pegOk + ' bad=' + pegBad + ' :: ' + pegDbg.slice(0, 10).join(' | '));
+
+
+      /* ============================================================
+       * G. 暖白主题（UI 层）
+       * 画布已经逐张验过了, 这里盯的是 DOM: 从深色主题改暖白, 最容易出的
+       * 两种事故是 (1) 某块 CSS 漏改, 深色残留 (2) 浅底上文字对比度不够看不清。
+       * 所以既查"是不是暖白", 也查 WCAG 对比度。
+       * ============================================================ */
+      function css(node, prop) { return w.getComputedStyle(node).getPropertyValue(prop); }
+      function rgbOf(str) {
+        var t = String(str).trim();
+        var m = t.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/);
+        if (m) return [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]];
+        /* CSS 自定义属性(var token)读出来是原样字面量, 不会被解析成 rgb() */
+        var hx = t.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+        if (hx) {
+          var v = hx[1];
+          if (v.length === 3) v = v[0] + v[0] + v[1] + v[1] + v[2] + v[2];
+          return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16), 1];
+        }
+        return null;
+      }
+      /* 暖白 = 亮 且 红>=绿>=蓝(带黄味), 不是纯白也不是冷灰 */
+      function isWarmWhite(c) {
+        return c && c[3] > 0.5 && c[0] > 235 && c[1] > 228 && c[2] > 215 &&
+               c[0] >= c[1] && c[1] >= c[2] && (c[0] - c[2]) >= 4;
+      }
+      function lum(c) {
+        var f = [c[0], c[1], c[2]].map(function (v) {
+          v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2];
+      }
+      function contrast(a, b) {
+        var la = lum(a), lb = lum(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+      }
+      /* 往上找第一个不透明的背景色(元素自己常是 transparent) */
+      /* 把带 alpha 的前景色合到背景上。
+       * 没这个的话, 用 opacity 淡化的置灰文字会拿原始 color 去算对比度,
+       * 结果永远假绿 —— 实际屏幕上只有 1.7:1。 */
+      function mix(f, b) {
+        if (!f) return null;
+        var a = f[3] === undefined ? 1 : f[3];
+        if (a >= 1) return [f[0], f[1], f[2], 1];
+        return [f[0] * a + b[0] * (1 - a), f[1] * a + b[1] * (1 - a), f[2] * a + b[2] * (1 - a), 1];
+      }
+      function bgOf(node) {
+        for (var n = node; n && n !== d.documentElement; n = n.parentElement) {
+          var c = rgbOf(css(n, 'background-color'));
+          if (c && c[3] > 0.9) return c;
+        }
+        return rgbOf(css(d.body, 'background-color')) || [255, 255, 255, 1];
+      }
+
+      // 1) 主要容器都必须是暖白/暖米, 不能有深色残留
+      var warmTargets = [
+        ['body', d.body], ['header', d.querySelector('header')],
+        ['#side', d.getElementById('side')], ['#editBar', d.getElementById('editBar')]
+      ];
+      var notWarm = [];
+      warmTargets.forEach(function (o) {
+        if (!o[1]) { notWarm.push(o[0] + ':missing'); return; }
+        var c = bgOf(o[1]);
+        if (!isWarmWhite(c)) notWarm.push(o[0] + '=' + JSON.stringify(c));
+      });
+      chk('主题: 主要容器是暖白(带黄味, 非纯白非冷灰)', notWarm.length === 0, notWarm.join(' ; '));
+
+      // 2) 全局扫一遍: 不允许还有"深色主题"的底色残留
+      (function () {
+        var all = d.querySelectorAll('body *');
+        var dark = [];
+        for (var ai = 0; ai < all.length; ai++) {
+          var n = all[ai];
+          if (n.tagName === 'CANVAS' || n.tagName === 'SCRIPT') continue;
+          if (!n.getClientRects().length) continue;              // 不可见的不算
+          var c = rgbOf(css(n, 'background-color'));
+          if (!c || c[3] < 0.9) continue;
+          if (lum(c) < 0.12) dark.push((n.id ? '#' + n.id : n.tagName.toLowerCase() + '.' + n.className) + '=' + c.slice(0, 3).join(','));
+        }
+        chk('主题: 无深色底残留', dark.length === 0, dark.slice(0, 5).join(' ; ') + ' (共' + dark.length + ')');
+      })();
+
+      /* 3) 对比度全面扇扫。
+       * 深底改浅底最容易翻车的就是这里: 原本在黑底上很清楚的中灰/彩色文字,
+       * 换到暖白底上就变成"看得见但费眼"。不只抽查几个点,
+       * 而是扫所有**带可见文本的叶子节点**, 按 WCAG AA 卡:
+       *   正常正文 >= 4.5:1; 大字(>=18.66px 或 >=14px 且粗) >= 3:1。 */
+      (function () {
+        var all = d.querySelectorAll('body *');
+        var bad = [], checked = 0;
+        for (var ti = 0; ti < all.length; ti++) {
+          var n = all[ti];
+          if (/^(SCRIPT|STYLE|CANVAS|OPTION|IFRAME)$/.test(n.tagName)) continue;
+          if (!n.getClientRects().length) continue;
+          // 只看叶子文本: 避开容器(容器的 color 会被子元素覆盖)
+          var own = '';
+          for (var ci3 = 0; ci3 < n.childNodes.length; ci3++) {
+            if (n.childNodes[ci3].nodeType === 3) own += n.childNodes[ci3].nodeValue;
+          }
+          if (!own.replace(/\s/g, '')) continue;
+          var fg = rgbOf(css(n, 'color'));
+          if (!fg || fg[3] < 0.5) continue;
+          var bg = bgOf(n);
+          if (!bg) continue;
+          /* opacity 也会淡化文字, 必须先合成 */
+          var op = parseFloat(css(n, 'opacity'));
+          if (isFinite(op) && op < 1) fg = mix([fg[0], fg[1], fg[2], op], bg);
+          var fs = parseFloat(css(n, 'font-size')) || 13;
+          var fw = parseInt(css(n, 'font-weight'), 10) || 400;
+          var large = fs >= 18.66 || (fs >= 14 && fw >= 700);
+          var need = large ? 3 : 4.5;
+          var cr = contrast(fg, bg);
+          checked++;
+          if (cr < need) {
+            bad.push((n.id ? '#' + n.id : n.tagName.toLowerCase() + (n.className ? '.' + n.className : '')) +
+              ' "' + own.replace(/\s+/g, ' ').trim().slice(0, 12) + '" ' + cr.toFixed(2) + '<' + need);
+          }
+        }
+        chk('主题: 扫到足够多的文本节点', checked > 40, checked);
+        chk('主题: 所有可见文字达 WCAG AA 对比度', bad.length === 0,
+          bad.slice(0, 6).join(' ; ') + (bad.length > 6 ? ' …共' + bad.length : ''));
+      })();
+
+      /* 3b) 悬停/选中/提示条这些"浅底 + 彩色字"的组合也要卡。
+       * 它们平时不在 DOM 当前状态里, 扇扫扫不到, 只能拿 token 直接算。 */
+      (function () {
+        function tok(name) { return rgbOf(css(d.documentElement, name).trim() || '#000'); }
+        var pairs = [
+          ['提示条 info', '--acc-soft', null, '#6d4913'],
+          ['提示条 warn', '--warn-soft', null, '#7a4e0d'],
+          ['提示条 error', '--err-soft', null, '#8d2d26'],
+          ['徒标 on', '--acc2-soft', '--acc2-ink'],
+          ['删除按钮', '--panel3', '--err-ink'],
+          ['选中行文字', '--sel-soft', '--fg'],
+          ['说明条正文', '--acc-soft', '--dim'],
+          ['表头文字', '--panel2', '--dim'],
+          ['分组表头', '--panel3', '--fg2'],
+          ['锁定格文字', '--panel3', '--dim'],
+          ['主按钮', '--acc', '--acc-ink'],
+          ['次按钮 hover', '--acc-soft', '--fg2'],
+          ['主按钮 hover', null, '--acc-ink', null, '#7f5416'],
+          ['导出按钮', '--acc2', null, '#ffffff'],
+          ['导出按钮 hover', null, null, '#ffffff', '#1f6f50']
+        ];
+        var bad = [];
+        pairs.forEach(function (p) {
+          var bg = p[1] ? tok(p[1]) : rgbOf(p[4]);
+          var fg = p[2] ? tok(p[2]) : rgbOf(p[3]);
+          if (!bg || !fg) { bad.push(p[0] + ':读不到颜色 bg=' + (p[1] || p[4]) + ' fg=' + (p[2] || p[3])); return; }
+          var cr = contrast(fg, bg);
+          if (cr < 4.5) bad.push(p[0] + ' ' + cr.toFixed(2) + ':1');
+        });
+        chk('主题: 配色组合(含 hover/选中/提示条)全部达 AA', bad.length === 0, bad.join(' ; '));
+      })();
+
+      /* ---- \u5bf9\u9f50\u5de5\u5177\u6761 / \u677f\u539a\u8f93\u5165: \u53ef\u89c1\u6027 + \u5bf9\u6bd4\u5ea6 ----
+       * \u771f\u5b9e\u8e29\u5230\u7684\u5751 (2 \u4e2a, \u90fd\u662f\u50cf\u7d20\u63a2\u9488\u63b3\u7684):
+       * 1) #alignBar \u7684 CSS \u9ed8\u8ba4\u5c31\u662f display:none, JS \u5199 style.display=''
+       *    \u4f1a\u9000\u56de CSS \u89c4\u5219 -> \u5de5\u5177\u6761\u6c38\u8fdc\u4e0d\u663e\u793a\u3002
+       *    \u800c\u65ad\u8a00 style.display !== 'none' \u4f1a\u5047\u7eff('' \u786e\u5b9e !== 'none')\u3002
+       *    => \u5fc5\u987b\u67e5 getClientRects().length \u4e0e computed display\u3002
+       * 2) \u7f6e\u7070\u6309\u94ae\u7528 opacity:.45 \u6de1\u5230 1.70:1, \u5b8c\u5168\u8bfb\u4e0d\u6e05\u3002 */
+      (function () {
+        w.__app.selectModel('custom');
+        w.__app.setCmode('panels');
+        st.panels = w.Custom.recipePanels('grid', {
+          thickness: 15, width: 600, depth: 300, height: 720, dividers: [300], shelvesPerBay: [1, 1]
+        });
+        w.__app.generate(); w.Editor.render();
+        w.__app.showPane('edit');
+        var ab = d.getElementById('alignBar');
+        chk('\u4e3b\u9898: alignBar \u771f\u7684\u6e32\u67d3\u51fa\u6765\u4e86(\u4e0d\u53ea\u662f style \u5199\u5bf9)',
+          ab.getClientRects().length > 0 && css(ab, 'display') !== 'none' && ab.getBoundingClientRect().height > 8,
+          css(ab, 'display') + ' h=' + ab.getBoundingClientRect().height);
+        chk('\u4e3b\u9898: alignBar \u91cc\u7684\u6309\u94ae\u771f\u7684\u53ef\u89c1',
+          ab.querySelector('button').getClientRects().length > 0);
+
+        function scanIn(root) {
+          var all = root.querySelectorAll('*'), bad = [], n = 0;
+          for (var i = 0; i < all.length; i++) {
+            var e = all[i];
+            if (/^(SCRIPT|STYLE|CANVAS|OPTION|IFRAME)$/.test(e.tagName)) continue;
+            if (!e.getClientRects().length) continue;
+            var own = '';
+            for (var c = 0; c < e.childNodes.length; c++) {
+              if (e.childNodes[c].nodeType === 3) own += e.childNodes[c].nodeValue;
+            }
+            if (!own.replace(/\s/g, '')) continue;
+            var fg = rgbOf(css(e, 'color'));
+            if (!fg) continue;
+            var bg = bgOf(e);
+            /* opacity \u4f1a\u628a\u6587\u5b57\u6de1\u6389, \u5fc5\u987b\u5148\u5408\u6210\u518d\u7b97 \u2014\u2014 \u5426\u5219\u7f6e\u7070\u6309\u94ae\u6c38\u8fdc\u5047\u7eff */
+            var op = parseFloat(css(e, 'opacity'));
+            if (isFinite(op) && op < 1) fg = mix([fg[0], fg[1], fg[2], op], bg);
+            var fs = parseFloat(css(e, 'font-size')) || 13;
+            var fw = parseInt(css(e, 'font-weight'), 10) || 400;
+            var need = (fs >= 18.66 || (fs >= 14 && fw >= 700)) ? 3 : 4.5;
+            var cr2 = contrast(fg, bg);
+            n++;
+            if (cr2 < need) {
+              bad.push((e.id ? '#' + e.id : e.tagName.toLowerCase() + (e.className ? '.' + e.className : '')) +
+                ' "' + own.replace(/\s+/g, ' ').trim().slice(0, 12) + '" ' + cr2.toFixed(2) + '<' + need +
+                (e.disabled ? ' [disabled]' : ''));
+            }
+          }
+          return { n: n, bad: bad };
+        }
+        /* \u672a\u9009\u4efb\u4f55\u677f: \u5bf9\u9f50\u6309\u94ae\u5168\u7f6e\u7070, \u4f46\u6587\u5b57\u4ecd\u9700\u8bfb\u5f97\u6e05 */
+        w.Editor.setSel(null); w.Editor.render();
+        var s1 = scanIn(ab);
+        chk('\u4e3b\u9898: alignBar \u7f6e\u7070\u6001\u626b\u5230\u8db3\u591f\u6587\u672c', s1.n >= 15, s1.n);
+        chk('\u4e3b\u9898: alignBar \u7f6e\u7070\u6309\u94ae\u4ecd\u8fbe WCAG AA', s1.bad.length === 0, s1.bad.slice(0, 5).join(' ; '));
+        chk('\u4e3b\u9898: \u7f6e\u7070\u6309\u94ae\u4e0d\u9760 opacity \u6de1\u5316',
+          parseFloat(css(ab.querySelector('button'), 'opacity')) > 0.9,
+          css(ab.querySelector('button'), 'opacity'));
+        /* \u591a\u9009\u540e\u542f\u7528\u6001 + \u63d0\u793a\u6d88\u606f\u6001 */
+        var ids3 = st.panels.slice(0, 3).map(function (p) { return p.id; });
+        st.selMulti = ids3; st.sel = ids3[2];
+        w.Editor.render();
+        var s2 = scanIn(ab);
+        chk('\u4e3b\u9898: alignBar \u542f\u7528\u6001\u5168\u8fbe AA', s2.bad.length === 0, s2.bad.slice(0, 5).join(' ; '));
+        w.Editor.doAlign('zmin');
+        var am = d.querySelector('#alignBar .alignMsg');
+        chk('\u4e3b\u9898: alignMsg \u5df2\u6e32\u67d3\u4e14\u53ef\u89c1', !!am && am.getClientRects().length > 0,
+          am ? am.textContent : 'none');
+        var s3 = scanIn(ab);
+        chk('\u4e3b\u9898: alignBar \u5e26\u6d88\u606f\u65f6\u5168\u8fbe AA', s3.bad.length === 0, s3.bad.slice(0, 5).join(' ; '));
+        /* planHud \u7684\u62d6\u62fd\u63d0\u793a */
+        var ph = d.getElementById('planHud');
+        chk('\u4e3b\u9898: planHud \u63d0\u793a\u53ef\u89c1\u4e14\u8fbe AA',
+          ph.getClientRects().length > 0 && contrast(rgbOf(css(ph, 'color')), bgOf(ph)) >= 4.5,
+          contrast(rgbOf(css(ph, 'color')), bgOf(ph)).toFixed(2));
+        /* \u677f\u539a\u8f93\u5165\u533a: chip + warnHint \u4e24\u79cd\u72b6\u6001 */
+        w.__app.selectModel('box');
+        var tchips = d.getElementById('thickChips');
+        chk('\u4e3b\u9898: \u677f\u539a chip \u53ef\u89c1', tchips.querySelectorAll('.chip')[0].getClientRects().length > 0);
+        var st4 = scanIn(tchips);
+        chk('\u4e3b\u9898: \u677f\u539a chip \u5168\u8fbe AA', st4.bad.length === 0, st4.bad.join(' ; '));
+        var ti2 = d.getElementById('thickness');
+        ti2.value = '999'; ti2.dispatchEvent(new w.Event('input', { bubbles: true }));
+        var hh = d.getElementById('thickHint');
+        chk('\u4e3b\u9898: \u8d8a\u754c\u65f6 warnHint \u751f\u6548', hh.className.indexOf('warnHint') >= 0, hh.className);
+        chk('\u4e3b\u9898: warnHint \u8fbe AA', contrast(rgbOf(css(hh, 'color')), bgOf(hh)) >= 4.5,
+          contrast(rgbOf(css(hh, 'color')), bgOf(hh)).toFixed(2));
+        ti2.value = '15';
+        ti2.dispatchEvent(new w.Event('input', { bubbles: true }));
+        ti2.dispatchEvent(new w.Event('change', { bubbles: true }));
+        chk('\u4e3b\u9898: \u6062\u590d\u540e warnHint \u6d88\u5931', hh.className === 'hint', hh.className);
+      })();
+
+      // 4) 板位表: 分组表头 / 板厚锁定格 / 选中行 的视觉区分必须真实存在
+      (function () {
+        var btn = d.getElementById('btnLoadPanels');
+        w.__app.setCmode('recipe');
+        (function () {
+          var rke = d.getElementById('recipeKey');
+          rke.value = 'grid';
+          rke.dispatchEvent(new w.Event('change'));
+        })();
+        w.__app.showPane('edit');
+        if (btn) btn.click();
+        var stx = w.__app.state;
+        chk('主题[板位表]: 进入板位表模式', stx.cmode === 'panels' && stx.panels.length > 0,
+          stx.cmode + '/' + stx.panels.length);
+        var gh = d.querySelector('#editGrid thead tr.grouphead th.grp1');
+        var ch2 = d.querySelector('#editGrid thead tr:last-child th');
+        chk('主题[板位表]: 分组表头比列名表头更深(层级看得出来)', (function () {
+          if (!gh || !ch2) return false;
+          var a = rgbOf(css(gh, 'background-color')), b = rgbOf(css(ch2, 'background-color'));
+          return a && b && lum(a) < lum(b) - 0.01;
+        })(), gh && ch2 ? css(gh, 'background-color') + ' vs ' + css(ch2, 'background-color') : 'missing');
+        chk('主题[板位表]: 两行表头都 sticky(滚动时列名不跑)', (function () {
+          if (!gh || !ch2) return false;
+          return css(gh, 'position') === 'sticky' && css(ch2, 'position') === 'sticky' &&
+                 parseFloat(css(ch2, 'top')) > 0;      // 第二行要让开第一行的高度
+        })(), gh && ch2 ? css(gh, 'position') + '/' + css(ch2, 'position') + ' top=' + css(ch2, 'top') : 'missing');
+
+        var lk = d.querySelector('#editGrid input.lock');
+        var free = null, ins = d.querySelectorAll('#editGrid input[type=number]');
+        for (var ii = 0; ii < ins.length; ii++) {
+          if (!/lock/.test(ins[ii].className)) { free = ins[ii]; break; }
+        }
+        chk('主题[板位表]: 存在板厚锁定格 + 可编辑格', !!lk && !!free, (lk ? 'lock✓' : 'lock✗') + (free ? ' free✓' : ' free✗'));
+        chk('主题[板位表]: 锁定格明显比可编辑格深(一眼看出不能改)', (function () {
+          if (!lk || !free) return false;
+          var a = rgbOf(css(lk, 'background-color')), b = rgbOf(css(free, 'background-color'));
+          return a && b && lum(a) < lum(b) - 0.05;
+        })(), lk && free ? css(lk, 'background-color') + ' vs ' + css(free, 'background-color') : 'missing');
+        chk('主题[板位表]: 锁定格 disabled 且有解释性 title', !!lk && lk.disabled && /板厚/.test(lk.title || ''),
+          lk ? lk.disabled + ' ' + (lk.title || '').slice(0, 20) : 'missing');
+        chk('主题[板位表]: 锁定格用虚线边(与实线的可编辑格区分)',
+          !!lk && css(lk, 'border-top-style') === 'dashed', lk ? css(lk, 'border-top-style') : 'missing');
+
+        // 选中行: 暖橙浅底 + 左侧竖条
+        stx.sel = stx.panels[0].id;
+        w.Editor.render();
+        var selTr = d.querySelector('#editGrid tbody tr.sel');
+        chk('主题[板位表]: 选中行存在', !!selTr);
+        chk('主题[板位表]: 选中行是暖橙浅底(比普通行更暖)', (function () {
+          if (!selTr) return false;
+          var c = rgbOf(css(selTr.children[0], 'background-color'));
+          return c && c[3] > 0.9 && c[0] > c[2] + 20 && lum(c) > 0.6;
+        })(), selTr ? css(selTr.children[0], 'background-color') : 'missing');
+        chk('主题[板位表]: 选中行左侧有强调竖条', !!selTr &&
+          /inset/.test(css(selTr.children[0], 'box-shadow')), selTr ? css(selTr.children[0], 'box-shadow') : 'missing');
+        chk('主题[板位表]: 位置/尺寸分组有竖分隔线(六个数分块)', (function () {
+          var sep = d.querySelectorAll('#editGrid td.sepL');
+          if (!sep.length) return false;
+          return parseFloat(css(sep[0], 'border-left-width')) >= 1;
+        })(), d.querySelectorAll('#editGrid td.sepL').length + ' 个 sepL 格');
+        chk('主题[板位表]: 说明条用暖色强调底', (function () {
+          var ld = d.querySelector('#editGrid .gridLead');
+          if (!ld) return false;
+          var c = rgbOf(css(ld, 'background-color'));
+          return c && c[0] > c[2] + 20 && lum(c) > 0.6;
+        })());
+        /* 表共 21 列, 小屏必然横滚。关键的六个数字列要在不滚的情况下就看得到,
+         * 而"选中"与"操作(删/复制)"这两头必须钉住——否则想删一块板得先把表拉到最右,
+         * 拉到最右又不知道自己在改哪一行。 */
+        (function () {
+          var hostEl = d.getElementById('editGrid');
+          var hrow = d.querySelectorAll('#editGrid thead tr');
+          if (hrow.length !== 2) { chk('主题[板位表]: 能拿到表头量列宽', false, hrow.length); return; }
+          var ths = hrow[1].children;
+          var names = Array.prototype.map.call(ths, function (t) { return t.textContent; });
+          var vw = hostEl.clientWidth;
+          function rightEdgeOf(label) {
+            var acc = 0;
+            for (var i = 0; i < ths.length; i++) {
+              acc += ths[i].getBoundingClientRect().width;
+              if (names[i] === label) return acc;
+            }
+            return Infinity;
+          }
+          chk('主题[板位表]: 六个数字列不滚就看得全',
+            rightEdgeOf('高 H') <= vw, '高H 右缘=' + Math.round(rightEdgeOf('高 H')) + ' 视口=' + vw);
+          var actTd = d.querySelector('#editGrid tbody td.act');
+          var pickTd = d.querySelector('#editGrid tbody td.stickL');
+          chk('主题[板位表]: 操作列钉在右边缘', !!actTd &&
+            css(actTd, 'position') === 'sticky' && parseFloat(css(actTd, 'right')) === 0,
+            actTd ? css(actTd, 'position') + ' right=' + css(actTd, 'right') : 'missing');
+          chk('主题[板位表]: 选中列钉在左边缘', !!pickTd &&
+            css(pickTd, 'position') === 'sticky' && parseFloat(css(pickTd, 'left')) === 0,
+            pickTd ? css(pickTd, 'position') + ' left=' + css(pickTd, 'left') : 'missing');
+          /* 钉住的格必须有**不透明**底色, 否则横滚时下层内容会从它底下透出来 */
+          [['操作列', actTd], ['选中列', pickTd]].forEach(function (o) {
+            if (!o[1]) return;
+            var c = rgbOf(css(o[1], 'background-color'));
+            chk('主题[板位表]: ' + o[0] + '底色不透明(横滚不穿帮)',
+              !!c && c[3] > 0.95, css(o[1], 'background-color'));
+          });
+          chk('主题[板位表]: 钉住列层级高于普通格', (function () {
+            var plain = null, tds = d.querySelectorAll('#editGrid tbody tr:first-child td');
+            for (var i = 0; i < tds.length; i++) {
+              if (!/act|stickL/.test(tds[i].className)) { plain = tds[i]; break; }
+            }
+            if (!plain || !actTd) return false;
+            var zA = parseInt(css(actTd, 'z-index'), 10) || 0;
+            var zP = parseInt(css(plain, 'z-index'), 10) || 0;
+            return zA > zP;
+          })());
+          // 表头两行的钉住列也要有 z-index 压过表体钉住列
+          var thR = d.querySelector('#editGrid th.stickR');
+          chk('主题[板位表]: 右上角表头既钉右也钉顶', !!thR &&
+            css(thR, 'position') === 'sticky' && parseFloat(css(thR, 'right')) === 0 &&
+            (parseInt(css(thR, 'z-index'), 10) || 0) > (parseInt(css(actTd, 'z-index'), 10) || 0),
+            thR ? 'right=' + css(thR, 'right') + ' z=' + css(thR, 'z-index') : 'missing');
+        })();
+
+        /* ---------- 可拖拽布局 (面板大小) ----------
+         * 关键点不是"宽度变了", 而是"canvas 后备区跟着重设了" ——
+         * canvas 是 width:100%/height:100% + dpr 重设位图, 只改 CSS 不重绘
+         * 就只是把旧位图拉伸(模糊 + 比例尺错)。所以每次拖完都要量
+         * cv.width / cv.height 是否 == round(clientW/H * dpr)。 */
+        (function () {
+          var A = w.__app;
+          var dpr = Math.min(2, w.devicePixelRatio || 1);
+          function ev(el, t, x, y) {
+            el.dispatchEvent(new w.MouseEvent(t, { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+          }
+          function key(el, k) {
+            el.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+          }
+          function dragV(dx) {
+            var el = d.getElementById('splitV'), r = el.getBoundingClientRect();
+            ev(el, 'mousedown', r.left + 3, r.top + 50);
+            ev(w, 'mousemove', r.left + 3 + dx, r.top + 50);
+            ev(w, 'mouseup', r.left + 3 + dx, r.top + 50);
+          }
+          function dragH(dy) {
+            var el = d.getElementById('splitH'), r = el.getBoundingClientRect();
+            ev(el, 'mousedown', r.left + 50, r.top + 3);
+            ev(w, 'mousemove', r.left + 50, r.top + 3 + dy);
+            ev(w, 'mouseup', r.left + 50, r.top + 3 + dy);
+          }
+          function crisp(cv) {
+            return cv.width === Math.round(cv.clientWidth * dpr) &&
+                   cv.height === Math.round(cv.clientHeight * dpr);
+          }
+          var sv = d.getElementById('splitV'), sh = d.getElementById('splitH');
+          chk('布局[分隔条]: 两根都存在', !!sv && !!sh);
+          chk('布局[分隔条]: 竖向游标=col-resize', css(sv, 'cursor') === 'col-resize', css(sv, 'cursor'));
+          chk('布局[分隔条]: 横向游标=row-resize', css(sh, 'cursor') === 'row-resize', css(sh, 'cursor'));
+          /* 6px 本体太细, 必须有 ::after 把命中区向两侧撑开, 否则鼠标很难抓住 */
+          chk('布局[分隔条]: 命中区被 ::after 撑宽(可抓)', (function () {
+            var a = w.getComputedStyle(sv, '::after');
+            return parseFloat(a.left) <= -3 && parseFloat(a.right) <= -3;
+          })(), w.getComputedStyle(sv, '::after').left + ' / ' + w.getComputedStyle(sv, '::after').right);
+
+          A.resetLayout();
+          A.showPane('nest');
+          var side = d.getElementById('side'), cn = d.getElementById('cvNest');
+          var w0 = side.clientWidth, nw0 = cn.width;
+          chk('布局[竖向]: 默认 320px', Math.abs(w0 - 320) <= 2, w0);
+          dragV(120);
+          chk('布局[竖向]: 拖右 120 后参数栈真的宽了 120',
+            Math.abs(side.clientWidth - (w0 + 120)) <= 2, side.clientWidth);
+          chk('布局[竖向]: 图纸区 canvas 后备区跟着缩了(真重绘不是拉伸)',
+            cn.width < nw0 && crisp(cn), nw0 + ' -> ' + cn.width + ' client=' + cn.clientWidth);
+          chk('布局[竖向]: 已写入 localStorage', (function () {
+            try { return JSON.parse(w.localStorage.getItem(A.LAYOUT_KEY)).side === A.layout.side; }
+            catch (e) { return false; }
+          })(), w.localStorage.getItem(A.LAYOUT_KEY));
+          dragV(-3000);
+          chk('布局[竖向]: 拖到底也不会把参数栈挤死(下限 240)',
+            side.clientWidth >= 238 && side.clientWidth <= 242, side.clientWidth);
+          dragV(4000);
+          chk('布局[竖向]: 上限 = min(560, 窗口一半)',
+            Math.abs(side.clientWidth - Math.min(560, Math.round(w.innerWidth * 0.5))) <= 2,
+            side.clientWidth + ' innerWidth=' + w.innerWidth);
+          chk('布局[竖向]: 夹紧后 canvas 仍不模糊', crisp(cn), cn.width + '/' + cn.clientWidth);
+          key(sv, 'ArrowLeft');
+          var wk = side.clientWidth;
+          key(sv, 'ArrowRight');
+          chk('布局[竖向]: 键盘 ←/→ 各微调 16px',
+            Math.abs(side.clientWidth - (wk + 16)) <= 2, wk + ' -> ' + side.clientWidth);
+          key(sv, 'Home');
+          chk('布局[竖向]: Home 复位 320', Math.abs(side.clientWidth - 320) <= 2, side.clientWidth);
+          dragV(90);
+          sv.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+          chk('布局[竖向]: 双击复位 320', Math.abs(side.clientWidth - 320) <= 2, side.clientWidth);
+
+          /* 横向: 清单表格 <-> 三视图。存百分比, 所以窗口变高不走形。 */
+          A.showPane('edit');
+          var pane = d.getElementById('editPane'), pw = d.getElementById('planWrap');
+          var eg = d.getElementById('editGrid'), cp = d.getElementById('cvPlan');
+          chk('布局[横向]: 板位表模式下分隔条可见', css(sh, 'display') !== 'none', css(sh, 'display'));
+          var ph0 = pw.clientHeight, cph0 = cp.height;
+          chk('布局[横向]: 默认三视图占 44%',
+            Math.abs(ph0 / pane.clientHeight * 100 - 44) < 1.5, ph0 + '/' + pane.clientHeight);
+          dragH(-120);
+          chk('布局[横向]: 向上拖 120 → 三视图高 +120',
+            Math.abs(pw.clientHeight - (ph0 + 120)) <= 3, ph0 + ' -> ' + pw.clientHeight);
+          chk('布局[横向]: 三视图 canvas 后备区跟着高了(真重绘)',
+            cp.height > cph0 && crisp(cp), cph0 + ' -> ' + cp.height + ' client=' + cp.clientHeight);
+          dragH(3000);
+          chk('布局[横向]: 拖到底三视图不低于 150px', pw.clientHeight >= 148, pw.clientHeight);
+          dragH(-3000);
+          chk('布局[横向]: 拖到顶表格仍留 >=180px(至少看得见表头+两行)',
+            eg.clientHeight >= 178, eg.clientHeight);
+          chk('布局[横向]: 两端夹紧后 canvas 仍不模糊', crisp(cp), cp.height + '/' + cp.clientHeight);
+          key(sh, 'Home');
+          chk('布局[横向]: Home 复位 44%', Math.abs(A.layout.plan - 44) < 0.01, A.layout.plan);
+          var pu = pw.clientHeight;
+          key(sh, 'ArrowUp');
+          chk('布局[横向]: 键盘 ↑ 把三视图调高 16px',
+            Math.abs(pw.clientHeight - (pu + 16)) <= 3, pu + ' -> ' + pw.clientHeight);
+          key(sh, 'ArrowDown');
+          chk('布局[横向]: 键盘 ↓ 调回去', Math.abs(pw.clientHeight - pu) <= 3, pw.clientHeight);
+
+          /* 清单模式没有三视图 → 分隔条必须跟着隐,
+           * 否则表格底下会挂一根拖不动任何东西的条。 */
+          A.setCmode('list');
+          chk('布局[横向]: 清单模式下分隔条跟着隐', css(sh, 'display') === 'none', css(sh, 'display'));
+          A.setCmode('panels');
+          chk('布局[横向]: 回板位表又露出来', css(sh, 'display') !== 'none', css(sh, 'display'));
+
+          /* 头部"布局复位"一键两轴都回默认 */
+          A.layout.side = 500; A.layout.plan = 72; A.applyLayout();
+          d.getElementById('btnLayoutReset').click();
+          chk('布局[复位]: 头部按钮两轴同时回默认',
+            Math.abs(A.layout.side - 320) < 0.01 && Math.abs(A.layout.plan - 44) < 0.01,
+            JSON.stringify(A.layout));
+          /* 读回的值可能是上次大窗口存的 → clamp 必须处理越界值 */
+          chk('布局[夹紧]: clampSide 拦住越界',
+            A.clampSide(10) === 240 && A.clampSide(99999) === Math.min(560, Math.round(w.innerWidth * 0.5)) &&
+            A.clampSide(NaN) === 240,
+            A.clampSide(10) + '/' + A.clampSide(99999) + '/' + A.clampSide(NaN));
+          chk('布局[夹紧]: clampPlan 拦住越界',
+            A.clampPlan(-99) > 0 && A.clampPlan(-99) < 44 && A.clampPlan(999) > 44 && A.clampPlan(999) < 100,
+            A.clampPlan(-99) + '/' + A.clampPlan(999));
+          /* 持久化回放: 下次打开必须还是用户拖完的尺寸。
+           * 直接 reload iframe 得重跑整个建模流程(慢且会打乖后面的用例),
+           * 所以改成直接驱动 loadLayout()+applyLayout() 这对纯函数。 */
+          w.localStorage.setItem(A.LAYOUT_KEY, JSON.stringify({ side: 418, plan: 55 }));
+          A.loadLayout(); A.applyLayout();
+          chk('布局[持久化]: 从 localStorage 读回后两轴都恢复',
+            Math.abs(side.clientWidth - 418) <= 2 && Math.abs(A.layout.plan - 55) < 0.01,
+            side.clientWidth + ' / ' + A.layout.plan);
+          /* 存的是上次大窗口的值(比如 1200px 宽的侧栏) → 读回必须重新夹,
+           * 否则小窗口下侧栏会把整个图纸区吃掉, 而且没地方能拖回来。 */
+          w.localStorage.setItem(A.LAYOUT_KEY, JSON.stringify({ side: 4000, plan: 300 }));
+          A.loadLayout(); A.applyLayout();
+          chk('布局[持久化]: 读回的超大旧值被重新夹紧(不会吃掉图纸区)',
+            side.clientWidth <= Math.min(560, Math.round(w.innerWidth * 0.5)) + 2 && A.layout.plan < 100,
+            side.clientWidth + ' / ' + A.layout.plan);
+          /* localStorage 里是垃圾也不能白屏 */
+          w.localStorage.setItem(A.LAYOUT_KEY, '{bad json');
+          chk('布局[持久化]: 坏数据不抛异常', (function () {
+            try { A.loadLayout(); A.applyLayout(); return true; } catch (e) { return false; }
+          })());
+          w.localStorage.removeItem(A.LAYOUT_KEY);
+          A.resetLayout();
+        })();
+
+        w.__app.setCmode('list');
+        w.__app.showPane('nest');
+      })();
+
+      w.__app.selectModel('box');
+    } catch (e) {
+      chk('exception', false, e.message + ' @ ' + (e.stack || '').split('\n')[1]);
+    }
+    var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+    document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+  }, 1300);
+};
+</script>

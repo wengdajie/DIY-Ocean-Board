@@ -1,0 +1,391 @@
+<!doctype html><meta charset="utf-8">
+<body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/joints.js"></script>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+try {
+var t = 12, EL = 300;
+
+// 1. 分格必为奇数, 且 phase 0/1 互补
+var s0 = J.spansFor(EL, { t: t, phase: 0 });
+var s1 = J.spansFor(EL, { t: t, m: s0.m, phase: 1 });
+chk('m odd', s0.m % 2 === 1, s0.m);
+chk('tabs+gaps = m', s0.tabs.length + s0.gaps.length === s0.m, [s0.tabs.length, s0.gaps.length]);
+chk('phase0 ends with tab', near(s0.tabs[0][0], 0) && near(s0.tabs[s0.tabs.length - 1][1], EL), [s0.tabs[0][0], s0.tabs[s0.tabs.length - 1][1]]);
+chk('phase1 ends with gap', near(s1.gaps[0][0], 0) && near(s1.gaps[s1.gaps.length - 1][1], EL));
+chk('complement: A.tabs == B.gaps', JSON.stringify(s0.tabs) === JSON.stringify(s1.gaps), s0.tabs.length + ' vs ' + s1.gaps.length);
+chk('complement: A.gaps == B.tabs', JSON.stringify(s0.gaps) === JSON.stringify(s1.tabs));
+var cover = 0; s0.tabs.concat(s0.gaps).forEach(function (g) { cover += g[1] - g[0]; });
+chk('spans cover full edge', near(cover, EL, 1e-9), cover);
+
+// 2. tabProfile: 面积增量 = 榫头总宽 * depth
+var box = G.rect(0, 0, EL, 200);
+var fit = 0.2;
+var prof = J.tabProfile(s0, t, { fit: fit });
+var tabbed = G.replaceEdge(box, 0, prof);
+var wsum = 0; s0.tabs.forEach(function (g) { wsum += (g[1] - g[0]) - fit / 2; });  // 每侧 fit/4
+chk('tab area delta', near(G.loopArea(tabbed) - G.loopArea(box), wsum * t, 1e-6), G.loopArea(tabbed) - G.loopArea(box));
+chk('tab protrudes t', near(G.loopBBox(tabbed).y0, -t, 1e-9), G.loopBBox(tabbed).y0);
+chk('tabbed simple', !G.selfIntersects(G.flatten(tabbed)));
+
+// 3. socketProfile: 内部槽; 贴端的 span 被跳过(转角由 phase 处理)
+var sockProf = J.socketProfile(s0, t, { fit: fit });
+var socketed = G.replaceEdge(box, 0, sockProf);
+chk('socket skips edge-touching spans', sockProf.skipped === 2, sockProf.skipped);
+chk('socket count', sockProf.length / 4 === s0.tabs.length - 2, sockProf.length / 4);
+var gsum = 0;
+s0.tabs.forEach(function (g) {
+  var u0 = g[0] - fit / 4, u1 = g[1] + fit / 4;
+  if (u0 > 1e-6 && u1 < EL - 1e-6) gsum += u1 - u0;
+});
+chk('socket area delta', near(G.loopArea(box) - G.loopArea(socketed), gsum * t, 1e-6), G.loopArea(box) - G.loopArea(socketed));
+chk('socketed simple', !G.selfIntersects(G.flatten(socketed)));
+// 中间齿: 槽比榫宽 fit(每侧 fit/2)
+var midTab = (s0.tabs[2][1] - s0.tabs[2][0]) - fit / 2;
+var midSock = (s0.tabs[2][1] - s0.tabs[2][0]) + fit / 2;
+// 榫进槽的总松量恒等于 fit
+chk('socket-tab clearance == fit (total)', near(midSock - midTab, fit, 1e-9), midSock - midTab);
+// phase=1 的件两端为槽区 -> 所有榫槽都在内部, 不该跳过
+var sp1 = J.socketProfile(s1, t, { fit: fit });
+chk('phase1 socket skips none', sp1.skipped === 0, sp1.skipped);
+chk('phase1 socketed simple', !G.selfIntersects(G.flatten(G.replaceEdge(box, 0, sp1))));
+
+// 4. 榫头/榫槽实际配合: 逐齿比较宽度
+var tabW = (s0.tabs[0][1] - s0.tabs[0][0]) - fit / 2;
+var sockW = (s0.tabs[0][1] - s0.tabs[0][0]) + fit / 2;
+chk('clearance per side = fit/2', near((sockW - tabW) / 2, fit / 2, 1e-12), (sockW - tabW) / 2);
+
+// 5. mortisesFromSpans: 数量/尺寸/CW 方向
+var f = G.frame(G.P(0, 100), G.P(EL, 100));
+var mos = J.mortisesFromSpans(s0, f, t, { fit: fit });
+chk('mortise count', mos.length === s0.tabs.length, mos.length);
+var mb = G.loopBBox(mos[1]);
+chk('mortise width = t+fit', near(mb.h, t + fit, 1e-9), mb.h);
+chk('mortise len = tab span + fit/2', near(mb.w, (s0.tabs[1][1] - s0.tabs[1][0]) + fit / 2, 1e-9), mb.w);
+chk('mortise is CW hole', mos.every(function (m) { return G.loopArea(m) < 0; }));
+
+// 6. 燕尾: 顶部比根部宽(自锁)
+/* 【第 6 轮推翻了旧断言】旧版这里断言"燕尾必须张角", 但那是个假绷:
+ * 90° 对接 + 直刀通切时张角在几何上**不可能**(证明见 joints.js tabProfile 头部)。
+ * 实测: t=12/H=120/11° 时前板与侧板的榫尖四处两两侵入 4.59mm,
+ * 且侧板榫尖跮出板边 -2.3/+122.3 —— 切出来真的装不上。
+ * 现在的正确行为是: 角接场景自动降为直榫; 只有显式 allowFlare(共面拼板)才张。 */
+var dv = J.tabProfile(s0, t, { fit: 0, style: 'dovetail', dovetailAngle: 11 });
+var dvStraight = J.tabProfile(s0, t, { fit: 0, style: 'finger' });
+chk('角接场景的 dovetail 自动降为直榫(不张角)',
+  JSON.stringify(dv) === JSON.stringify(dvStraight), JSON.stringify(dv.slice(0, 2)));
+var dvF = J.tabProfile(s0, t, { fit: 0, style: 'dovetail', dovetailAngle: 11, allowFlare: true });
+var rootF = dvF[0].u, tipF = dvF[1].u;
+chk('allowFlare 后确实张角', tipF < rootF, [rootF, tipF]);
+var flare = t * Math.tan(11 * Math.PI / 180);
+chk('张角量 = depth*tan(ang)', near(rootF - tipF, flare, 1e-9), rootF - tipF);
+var dvLoop = G.replaceEdge(box, 0, dvF);
+chk('张角后面积大于直榫', G.loopArea(dvLoop) > G.loopArea(G.replaceEdge(box, 0, dvStraight)));
+chk('dovetail simple', !G.selfIntersects(G.flatten(dvLoop)));
+
+/* ---- 新增的多种榫卯样式 ---- */
+(function () {
+  var sp = J.spansFor(200, { t: 12, m: 5, phase: 0 });
+  var bx = G.rect(0, 0, 200, 100);
+  /* 每一种都要: (a) 能接成合法不自交轮廓; (b) 真的改变了面积 */
+  J.STYLES.forEach(function (st) {
+    var pf = J.profileFor(st.key, sp, 12, { fit: 0.2, dovetailAngle: 11, allowFlare: true });
+    if (J.isFlatStyle(st.key)) {
+      chk('样式 ' + st.key + ' 是平对接(不改轮廓)', pf.length === 0, pf.length);
+      return;
+    }
+    chk('样式 ' + st.key + ' 产出轮廓', pf.length > 0, pf.length);
+    var lp = G.replaceEdge(bx, 0, pf);
+    chk('样式 ' + st.key + ' 轮廓不自交', !G.selfIntersects(G.flatten(lp, 0.05)));
+    chk('样式 ' + st.key + ' 确实改变了形状',
+      Math.abs(G.loopArea(lp) - 200 * 100) > 1, G.round(G.loopArea(lp) - 20000, 2));
+  });
+  /* 拼图燕尾: 颈部必须比头部窄(否则不自锁) */
+  var pz = J.puzzleProfile(sp, 12, { fit: 0, neck: 0.5 });
+  var seg = pz.slice(0, 6);
+  var rootW = seg[5].u - seg[0].u, neckW = seg[4].u - seg[1].u, headW = seg[3].u - seg[2].u;
+  chk('拼图燕尾: 颈部 < 头部(自锁)', neckW < headW - 1, G.round(neckW, 2) + ' vs ' + G.round(headW, 2));
+  chk('拼图燕尾: 头部 == 根部宽(不跮出邻齿)', near(headW, rootW, 1e-9), [headW, rootW]);
+  /* 楛钉榫: 榫头必须穿出母件, 否则楛子无处可敲 */
+  var wt = J.wedgeTenonProfile(sp, 12, { fit: 0, ext: 10 });
+  var maxV = Math.max.apply(null, wt.map(function (q) { return q.v; }));
+  chk('楛钉榫: 榫头穿出母件 depth+ext', near(maxV, 22, 1e-9), maxV);
+  var ws = J.wedgeSlots(sp, G.frame(G.P(0, 0), G.P(200, 0)), 12, { fit: 0.2, depth: 12, ext: 10 });
+  chk('楛钉榫: 每个榫齿一个楛口', ws.length === sp.tabs.length, ws.length);
+  chk('楛口全是 CW 孔', ws.every(function (l) { return G.loopArea(l) < 0; }));
+  /* 楛口必须跨过母件内表面(否则敲不到肩)。
+   * 注意不能直接看世界 y: frame(P(0,0)->P(200,0)) 的 v>0 指向 -y,
+   * 所以要拿 frame 把世界坐标反推回 v。此前这条断言就是这么写错的。 */
+  var wf = G.frame(G.P(0, 0), G.P(200, 0));
+  var wsv = G.flatten(ws[0], 0.05).map(function (q) {
+    return (q.x - wf.A.x) * wf.ey.x + (q.y - wf.A.y) * wf.ey.y;
+  });
+  var wv0 = Math.min.apply(null, wsv), wv1 = Math.max.apply(null, wsv);
+  chk('楛口跨过母件内表面(v 方向)', wv0 < 12 - 1e-9 && wv1 > 12,
+    [G.round(wv0, 2), G.round(wv1, 2)]);
+  var wb = { w: wv1 - wv0 };
+  var wsu = G.flatten(ws[0], 0.05).map(function (q) {
+    return (q.x - wf.A.x) * wf.ex.x + (q.y - wf.A.y) * wf.ex.y;
+  });
+  wb.w = Math.max.apply(null, wsu) - Math.min.apply(null, wsu);   // 楛口“宽”是沿 u 的
+  /* 楛片必须能塞进楛口(同参数 => 尺寸匹配), 且带过盈 */
+  var wp = J.wedgePart(12, { fit: 0.2, depth: 12, ext: 10 });
+  var wpb = G.loopBBox(wp);
+  chk('楛片宽带过盈(比楛口宽 fit/2)', wpb.w > wb.w - 1e-9, [G.round(wpb.w, 3), G.round(wb.w, 3)]);
+  chk('楛片是 CCW 实体', G.loopArea(wp) > 0);
+  chk('楛片不自交', !G.selfIntersects(G.flatten(wp)));
+  /* 勾齿搭接: 两个方向必须镂空量相同、且都超过纯直槽 */
+  var lapS = J.lapNotchProfile(100, 12, 30, { fit: 0.2 });
+  var hkP = J.hookLapProfile(100, 12, 30, { fit: 0.2, hookDir: 1 });
+  var hkN = J.hookLapProfile(100, 12, 30, { fit: 0.2, hookDir: -1 });
+  function areaOf(pf) { return Math.abs(G.loopArea(G.replaceEdge(G.rect(0, 0, 200, 100), 0, pf))); }
+  chk('勾齿搭接比直槽多镂一块(勾住)', areaOf(hkP) < areaOf(lapS) - 1,
+    [G.round(areaOf(hkP), 1), G.round(areaOf(lapS), 1)]);
+  chk('勾齿两方向镂空量相等(镜像对称)', near(areaOf(hkP), areaOf(hkN), 1e-6),
+    [G.round(areaOf(hkP), 4), G.round(areaOf(hkN), 4)]);
+  chk('勾齿轮廓不自交', !G.selfIntersects(G.flatten(G.replaceEdge(G.rect(0, 0, 200, 100), 0, hkP))));
+  /* 木销 / 饼干 */
+  var dw = J.dowelPairs(G.frame(G.P(0, 50), G.P(200, 50)), 200, 15, { dia: 8, count: 3 });
+  chk('木销: 3 个孔', dw.faceHoles.length === 3, dw.faceHoles.length);
+  chk('木销孔全是 CW', dw.faceHoles.every(function (l) { return G.loopArea(l) < 0; }));
+  chk('木销孔沿边居中对称', (function () {
+    var bs = dw.faceHoles.map(function (l) { return G.loopBBox(l); });
+    return near(bs[0].x0, 200 - bs[2].x1, 1e-9);
+  })());
+  var bi = J.biscuitSlots(G.frame(G.P(0, 50), G.P(200, 50)), 200, 15, { count: 2 });
+  chk('饼干: 2 个腻槽', bi.slots.length === 2, bi.slots.length);
+  chk('饼干槽长 > 宽(腻形)', bi.len > bi.wide * 2, [bi.len, bi.wide]);
+  /* STYLES 元数据自身的一致性 */
+  chk('STYLES 没有重复 key', Object.keys(J.STYLE_BY_KEY).length === J.STYLES.length);
+  chk('燕尾类被标记为不可用于角接',
+    J.STYLE_BY_KEY.dovetail.corner === false && J.STYLE_BY_KEY.puzzle.corner === false);
+  chk('指接类可用于角接', J.STYLE_BY_KEY.finger.corner === true);
+  chk('未知样式不静默变成另一种(回退到直榫)',
+    JSON.stringify(J.profileFor('不存在的样式', sp, 12, { fit: 0.2 })) ===
+    JSON.stringify(J.tabProfile(sp, 12, { fit: 0.2 })));
+})();
+
+// 7. dogbone 让位: 只在内凹角, 面积应减少(过切去料)
+var notch = G.replaceEdge(G.rect(0, 0, 100, 100), 0, [{ u: 40, v: 0 }, { u: 40, v: -20 }, { u: 60, v: -20 }, { u: 60, v: 0 }]);
+var r = 1.6;
+var db = J.applyRelief(notch, r, 'dogbone');
+chk('dogbone removes material', G.loopArea(db) < G.loopArea(notch), [G.loopArea(notch), G.loopArea(db)]);
+chk('dogbone adds pts', db.length > notch.length, [notch.length, db.length]);
+chk('dogbone simple', !G.selfIntersects(G.flatten(db)));
+// 槽底两个内角各过切一个圆: 面积减少约 2*(pi*r^2*3/4 - r^2/2)... 只验证量级
+var d = G.loopArea(notch) - G.loopArea(db);
+chk('dogbone delta magnitude', d > 0 && d < 4 * Math.PI * r * r, d);
+var tb = J.applyRelief(notch, r, 'tbone');
+chk('tbone removes material', G.loopArea(tb) < G.loopArea(notch), G.loopArea(tb));
+chk('tbone simple', !G.selfIntersects(G.flatten(tb)));
+chk('relief none = noop', J.applyRelief(notch, 0, 'dogbone').length === notch.length);
+// 凸角(外角)不应被让位: 纯矩形不变
+chk('convex corners untouched', J.applyRelief(G.rect(0, 0, 50, 50), r, 'dogbone').length === 4);
+
+// 8. groove
+var gr = J.grooveLoop(G.P(10, 50), G.P(290, 50), t, { fit: fit });
+var gb = G.loopBBox(gr);
+chk('groove size', near(gb.w, 280, 1e-9) && near(gb.h, t + fit, 1e-9), [gb.w, gb.h]);
+chk('groove CW', G.loopArea(gr) < 0);
+
+// 9. lap notch: 深度与宽度
+var lap = G.replaceEdge(G.rect(0, 0, 200, 100), 0, J.lapNotchProfile(100, t, 50, { fit: fit }));
+chk('lap area', near(G.loopArea(G.rect(0, 0, 200, 100)) - G.loopArea(lap), (t + fit) * 50, 1e-9), G.loopArea(lap));
+
+// 10. 校核
+var w1 = J.checkJoint({ thickness: 12, edgeLen: 300, m: 41, fit: 0.2 });
+chk('check warns on thin fingers', w1.some(function (m) { return m.level === 'warn'; }), JSON.stringify(w1));
+chk('check ok on sane', J.checkJoint({ thickness: 12, edgeLen: 300, m: 11, fit: 0.2 }).length === 0);
+chk('check errors neg fit', J.checkJoint({ thickness: 12, edgeLen: 300, m: 11, fit: -1 }).some(function (m) { return m.level === 'error'; }));
+// ============================================================
+// 11. 多种榫卯方式 (第 8 轮新增)
+// ============================================================
+// ---- 11a. 元数据表本身的完整性 ----
+chk('STYLES 非空且有 11 种', J.STYLES.length === 11, J.STYLES.length);
+chk('每种样式都有 key/label/hint', J.STYLES.every(function (o) {
+  return o.key && o.label && o.hint;
+}), J.STYLES.filter(function (o) { return !(o.key && o.label && o.hint); }).map(function (o) { return o.key; }).join(','));
+chk('STYLE_BY_KEY 覆盖全部', J.STYLES.every(function (o) { return J.STYLE_BY_KEY[o.key] === o; }));
+chk('key 不重复', Object.keys(J.STYLE_BY_KEY).length === J.STYLES.length);
+// 能力位必须**显式**声明: 靠 undefined 兜底会让新增样式默默变成"处处可用"
+chk('corner/mid 能力位显式声明', J.STYLES.every(function (o) {
+  return typeof o.corner === 'boolean' && typeof o.mid === 'boolean';
+}), J.STYLES.filter(function (o) { return typeof o.corner !== 'boolean' || typeof o.mid !== 'boolean'; }).map(function (o) { return o.key; }).join(','));
+
+// ---- 11b. styleOk / stylesFor ----
+chk('finger 两处都能用', J.styleOk('finger', 'corner') && J.styleOk('finger', 'mid'));
+chk('dovetail 两处都不能用', !J.styleOk('dovetail', 'corner') && !J.styleOk('dovetail', 'mid'));
+chk('wedge 只能中部', !J.styleOk('wedge', 'corner') && J.styleOk('wedge', 'mid'));
+chk('snap 只能中部', !J.styleOk('snap', 'corner') && J.styleOk('snap', 'mid'));
+chk('tongue 只能中部', !J.styleOk('tongue', 'corner') && J.styleOk('tongue', 'mid'));
+chk('未知样式一律不可用', !J.styleOk('nosuch', 'corner') && !J.styleOk('nosuch', 'mid'));
+chk('stylesFor(corner) 少于全部', J.stylesFor('corner').length < J.STYLES.length &&
+  J.stylesFor('corner').length >= 4, J.stylesFor('corner').map(function (o) { return o.key; }).join(','));
+chk('stylesFor(mid) 包含 wedge/snap/tongue', ['wedge', 'snap', 'tongue'].every(function (k) {
+  return J.stylesFor('mid').some(function (o) { return o.key === k; });
+}));
+
+// ---- 11c. resolveStyle: 降级必须显式可见 ----
+var rsW = J.resolveStyle('wedge', 'corner');
+chk('wedge@corner 降级为 finger', rsW.style === 'finger' && rsW.fell === true && rsW.from === 'wedge');
+var rsW2 = J.resolveStyle('wedge', 'mid');
+chk('wedge@mid 不降级', rsW2.style === 'wedge' && rsW2.fell === false);
+var rsU = J.resolveStyle('bogus', 'mid');
+chk('未知样式降级且标 unknown', rsU.style === 'finger' && rsU.fell && rsU.reason === 'unknown');
+// 降级原因必须是**人话**且点出根因, 而不是 "not supported"
+chk('fallbackText 说明楔子无处可用', /楔子/.test(J.fallbackText(rsW, 'corner')) &&
+  /通孔/.test(J.fallbackText(rsW, 'corner')), J.fallbackText(rsW, 'corner'));
+chk('fallbackText 燕尾说干涉', /干涉/.test(J.fallbackText(J.resolveStyle('dovetail', 'corner'), 'corner')));
+chk('fallbackText 嵌槽说槽没处开', /槽/.test(J.fallbackText(J.resolveStyle('tongue', 'corner'), 'corner')));
+chk('fallbackText 未知样式列出可选项', /finger/.test(J.fallbackText(rsU, 'mid')) &&
+  /wedge/.test(J.fallbackText(rsU, 'mid')));
+
+// ---- 11d. profileFor 挂 spans/style/depth (下游据此生成附加特征) ----
+var spF = J.spansFor(300, { t: t, m: 5, phase: 0 });
+J.STYLES.forEach(function (st) {
+  var pf = J.profileFor(st.key, spF, t, { fit: fit });
+  chk('profileFor(' + st.key + ') 带 spans/style/depth',
+    pf && pf.spans === spF && pf.style === st.key && pf.depth === t);
+});
+chk('dowel/biscuit 返回空轮廓(不改外形)',
+  J.profileFor('dowel', spF, t, {}).length === 0 && J.profileFor('biscuit', spF, t, {}).length === 0);
+chk('其余样式都产出非空轮廓', J.STYLES.filter(function (st) {
+  return !J.isFlatStyle(st.key);
+}).every(function (st) { return J.profileFor(st.key, spF, t, { fit: fit }).length > 0; }));
+
+// ---- 11e. 榫头绝不许超出名义 tabs 区间(否则插不进配对件的槽) ----
+// 这正是第 8 轮修掉的 filletTabProfile 真实干涉 BUG 的钉子。
+J.STYLES.forEach(function (st) {
+  if (J.isFlatStyle(st.key) || st.key === 'wedge' || st.key === 'snap' || st.key === 'tongue') return;
+  var pf = J.profileFor(st.key, spF, t, { fit: fit });
+  var lo = Infinity, hi = -Infinity;
+  pf.forEach(function (q) { lo = Math.min(lo, q.u); hi = Math.max(hi, q.u); });
+  var t0 = spF.tabs[0][0], t1 = spF.tabs[spF.tabs.length - 1][1];
+  chk(st.key + ': 榫头不超出名义 tabs [' + t0 + ',' + t1 + ']',
+    lo >= t0 - 1e-9 && hi <= t1 + 1e-9, [lo, hi]);
+});
+
+// ---- 11f. 卡扣榫: 倒钩在母件之外、弹性缝真的割断了榫头 ----
+var snp = J.snapTabProfile(spF, t, { fit: fit });
+var vMax = -Infinity, vMin = Infinity;
+snp.forEach(function (q) { vMax = Math.max(vMax, q.v); vMin = Math.min(vMin, q.v); });
+chk('snap 倒钩伸到板厚之外(v > t)', vMax > t + 1e-6, vMax);
+chk('snap 报告 lip 与倒钩数', snp.lip > 0 && snp.barbed > 0, [snp.lip, snp.barbed]);
+// 缝必须割进板身(v < 0), 否则两瓣捏不动 -> 卡扣塞不进去
+chk('snap 弹性缝割进板身(v < 0)', vMin < 0, vMin);
+chk('snap 缝深受 spans.inset 约束', (function () {
+  var spI = J.spansFor(300, { t: t, m: 5, phase: 0, inset: 3 });
+  var p2 = J.snapTabProfile(spI, t, { fit: fit });
+  return p2.slitBack <= 3 * 0.8 + 1e-9;
+})(), J.snapTabProfile(J.spansFor(300, { t: t, m: 5, phase: 0, inset: 3 }), t, {}).slitBack);
+chk('snap maxBack 能进一步夹紧', J.snapTabProfile(spF, t, { fit: fit, maxBack: 2 }).slitBack <= 2 + 1e-9);
+// 缝宽 < 1mm 时必须**不开缝**(3.175 的刀根本进不去, 激光也会熔回去)
+chk('snap 缝太窄则不开缝', (function () {
+  var p3 = J.snapTabProfile(spF, t, { fit: fit, slit: 0.4 });
+  return p3.every(function (q) { return q.v >= -1e-9; });
+})());
+// 相邻榫齿的倒钩对着长进同一槽区 -> 各取 0.4 而非 0.5, 否则必然相交
+chk('snap 轮廓不自交(含倒钩+缝)', (function () {
+  var lp = Models_panel_snap();
+  return lp && !G.selfIntersects(G.flatten(lp, 0.1));
+})());
+function Models_panel_snap() {
+  var pts = [], f = G.frame(G.P(0, 0), G.P(300, 0));
+  var pf = J.snapTabProfile(J.spansFor(300, { t: t, m: 7, phase: 0, inset: 10 }), t, { fit: fit });
+  pts.push(G.P(0, 0));
+  f.map(pf).forEach(function (q) { pts.push(q); });
+  pts.push(G.P(300, 0), G.P(300, 200), G.P(0, 200));
+  return G.cleanLoop(pts);
+}
+
+// ---- 11g. 舌槽榫: 停止槽必须缩在板内(否则 pocket 判"越出板边") ----
+var tg = J.tongueProfile(J.spansFor(300, { t: t }), 6, { fit: fit, thickness: t });
+var tlo = Infinity, thi = -Infinity;
+tg.forEach(function (q) { tlo = Math.min(tlo, q.u); thi = Math.max(thi, q.u); });
+chk('tongue 两端都缩进板内', tlo > 0.5 && thi < 300 - 0.5, [tlo, thi]);
+chk('tongue 报告 inset', tg.inset > 0, tg.inset);
+chk('tongue 是单段连续舌(4 点)', tg.length === 4, tg.length);
+var tgEx = J.styleExtras('tongue', J.spansFor(300, { t: t }), G.frame(G.P(0, 50), G.P(300, 50)), t, 'host', { fit: fit });
+chk('tongue host 出 pocket 而非通孔', tgEx.pockets.length === 1 && tgEx.holes.length === 0,
+  [tgEx.pockets.length, tgEx.holes.length]);
+chk('tongue pocket 深度 < 板厚(不切透)', tgEx.pockets[0].depth > 0 && tgEx.pockets[0].depth < t,
+  [tgEx.pockets[0].depth, t]);
+// 槽必须比舌略长: 平底铣刀在槽两端留圆角, 一样长就顶住肩合不严
+var gbb = G.loopBBox(tgEx.pockets[0].loop);
+chk('tongue 槽比舌长(留刀圆角余量)', gbb.w > (thi - tlo), [gbb.w, thi - tlo]);
+chk('tongue 槽仍在板内(未开到边)', gbb.x0 > 0 && gbb.x1 < 300, [gbb.x0, gbb.x1]);
+
+// ---- 11h. styleExtras: 木销/饼干必须真的产出孔槽 ----
+var fE = G.frame(G.P(0, 40), G.P(300, 40));
+var dwH = J.styleExtras('dowel', spF, fE, t, 'host', { fit: fit });
+chk('dowel host 产出板面通孔', dwH.holes.length >= 2, dwH.holes.length);
+chk('dowel host 孔为 CW', dwH.holes.every(function (l) { return G.loopArea(l) < 0; }));
+var dwT = J.styleExtras('dowel', spF, fE, t, 'tab', { fit: fit });
+chk('dowel tab 只给标记(端面钻不出来)', dwT.holes.length === 0 && dwT.marks.length >= 2,
+  [dwT.holes.length, dwT.marks.length]);
+chk('dowel tab 标记是带直径的圆', dwT.marks.every(function (m) { return m.type === 'circle' && m.d > 0; }));
+chk('dowel 两侧孔数一致(才配得上)', dwH.holes.length === dwT.marks.length, [dwH.holes.length, dwT.marks.length]);
+var bsH = J.styleExtras('biscuit', spF, fE, t, 'host', { fit: fit });
+chk('biscuit host 产出定深槽', bsH.pockets.length >= 1 && bsH.holes.length === 0, [bsH.pockets.length, bsH.holes.length]);
+chk('biscuit 槽深 < 板厚', bsH.pockets.every(function (q) { return q.depth > 0 && q.depth < t; }));
+var wdT = J.styleExtras('wedge', spF, fE, t, 'tab', { fit: fit, ext: t });
+chk('wedge tab 产出楔口通孔', wdT.holes.length >= 1, wdT.holes.length);
+chk('wedge tab 附带独立楔片零件', wdT.extraParts.length >= 1 &&
+  wdT.extraParts[0].kind === 'wedge' && wdT.extraParts[0].count >= 1,
+  JSON.stringify(wdT.extraParts.map(function (q) { return [q.kind, q.count]; })));
+chk('finger 无附加特征', (function () {
+  var e = J.styleExtras('finger', spF, fE, t, 'tab', {});
+  return !e.holes.length && !e.pockets.length && !e.marks.length && !e.extraParts.length;
+})());
+// 每种样式的 extras 都必须带**人话说明**, 否则料单上看不出这块板要做什么
+chk('需额外加工的样式都给了 notes', ['dowel', 'biscuit', 'wedge', 'tongue'].every(function (k) {
+  return J.styleExtras(k, spF, fE, t, 'host', { fit: fit }).notes.length > 0 ||
+    J.styleExtras(k, spF, fE, t, 'tab', { fit: fit }).notes.length > 0;
+}));
+
+// ---- 11i. 楔口不许穿出榫齿侧壁(第 8 轮修的 wTop vs wide 缺陷) ----
+(function () {
+  var bad = 0, tot = 0;
+  [9, 12, 15, 18, 25].forEach(function (tt) {
+    var sp = J.spansFor(300, { t: tt, m: 5, phase: 0 });
+    var slots = J.wedgeSlots(sp, G.frame(G.P(0, 0), G.P(300, 0)), tt, { fit: 0.2 });
+    slots.forEach(function (l) {
+      tot++;
+      var b = G.loopBBox(l);
+      // 楔口必须整个落在某个榫齿的 u 区间内
+      var ok = sp.tabs.some(function (g) { return b.x0 >= g[0] - 1e-9 && b.x1 <= g[1] + 1e-9; });
+      if (!ok) bad++;
+    });
+  });
+  chk('楔口全部落在榫齿内(5 种板厚)', bad === 0 && tot >= 10, [bad, tot]);
+})();
+
+// ---- 11j. needsFaceOverlap / growOf ----
+chk('无榫类需要盖板叠合构造', J.needsFaceOverlap('dowel') && J.needsFaceOverlap('biscuit'));
+chk('指接类不需要叠合', !J.needsFaceOverlap('finger') && !J.needsFaceOverlap('mitre'));
+chk('growOf: 指接不外扩', J.growOf('finger', 15, {}) === 0 && J.growOf('mitre', 15, {}) === 0);
+chk('growOf: 楔钉外扩 0.9t', Math.abs(J.growOf('wedge', 15, {}) - 13.5) < 1e-9, J.growOf('wedge', 15, {}));
+chk('growOf: 卡扣外扩 = lip', Math.abs(J.growOf('snap', 15, {}) - Math.max(3, 15 * 0.55)) < 1e-9, J.growOf('snap', 15, {}));
+chk('growOf 认显式 ext/lip', J.growOf('wedge', 15, { ext: 20 }) === 20 && J.growOf('snap', 15, { lip: 5 }) === 5);
+
+// ---- 11k. 搭接口径表 ----
+chk('LAP_STYLES 有平口与勾齿', J.LAP_STYLES.length === 2 &&
+  J.LAP_BY_KEY.plain && J.LAP_BY_KEY.hook);
+var lpP = J.lapNotchProfile(100, t, 50, { fit: fit });
+var lpH = J.hookLapProfile(100, t, 50, { fit: fit, hookDir: 1 });
+chk('勾齿比平口多拐两个点', lpH.length > lpP.length, [lpP.length, lpH.length]);
+// 勾齿的方向必须真的相反, 否则配对两片推不拢
+var lpH2 = J.hookLapProfile(100, t, 50, { fit: fit, hookDir: -1 });
+chk('勾齿两个方向的轮廓不同', JSON.stringify(lpH) !== JSON.stringify(lpH2));
+chk('勾齿 +1 往 u 大侧伸', Math.max.apply(null, lpH.map(function (q) { return q.u; })) >
+  Math.max.apply(null, lpP.map(function (q) { return q.u; })));
+chk('勾齿 -1 往 u 小侧伸', Math.min.apply(null, lpH2.map(function (q) { return q.u; })) <
+  Math.min.apply(null, lpP.map(function (q) { return q.u; })));
+
+} catch (e) { L.push('FAIL exception ' + e.message + '\n' + e.stack); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>

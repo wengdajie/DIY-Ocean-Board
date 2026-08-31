@@ -1,0 +1,365 @@
+<!doctype html><meta charset="utf-8"><title>让位(小耳朵) · 测试</title><body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/joints.js"></script>
+<script src="../js/part.js"></script>
+<script src="../js/models.js"></script>
+<script>
+/* ============================================================
+ * test-relief.html —— 内凹角让位 (dogbone / T-bone, 俗称"小耳朵") 专项断言
+ *
+ * 这套件的核心是一个**栅格化的刀具可达性判定**(reach 函数), 直接回答
+ * 用户真正关心的问题: "这张图交给 CNC, 配对的方榫插得进去吗?"
+ * 做法 = 形态学开运算模拟真实刀路:
+ *     刀心可达域 = void 的 r-腐蚀      (刀盘必须整个落在要切掉的区域里)
+ *     实际切掉域 = 刀心可达域的 r-膨胀 (刀盘扫过的地方)
+ *     残料       = 名义缺口 ∩ 补集(实际切掉域)
+ *
+ * 【本轮(第 8 轮)用它取证并修掉的 4 个真实缺陷】
+ *  1) T-bone 耳长只有 r, 等于没做。24x16 缺口 + 刀 r=3.2 实测残料
+ *     4.22mm2 vs 无让位 4.84mm2 —— 只解决 13%。
+ *     几何原因: 刀心要走到角点法线上, 必须离入边 >= r 且离角点 >= r,
+ *     耳长 r 时刀心根本进不去。**耳长必须 >= 2r**(实测 1.5r 残 2.34, 2r 归零)。
+ *  2) 邻边比 r 短就整个跳过 -> 浅缺口(60 宽 x 1.0 深)镂 0mm2, 完全没让位。
+ *     现在按邻边把 r 缩小后照做。
+ *  3) turn < 20° 就跳过 -> 钝内角(转角 15°)也卡刀, 被漏掉。阈值降到 2°。
+ *  4) 相邻两个内凹角共用一条短边时, 各自占一段会互相越过 -> **自交废图**。
+ *     实测 6mm 宽缺口 + 刀 r=3.2: 旧版镂 74mm2 且 selfIntersects=true。
+ *     现在把边长当作两端共享的预算统一分配。
+ *
+ * ⚠️ reach() 有两个必须踩对的细节(取证时两次踩错, 得出"让位毫无作用"的假结论):
+ *   a) 栅格窗口必须比 ROI 大 2r+, 否则窗外被保守当材料, 刀根本进不来。
+ *   b) 腐蚀刀盘半径必须 <= r 而不能因取整放大 —— dogbone 的过切圆半径
+ *      恰好 = r, 刀盘大一丝(1.65 vs 1.5875)就"卡住", 结论全反。
+ * ============================================================ */
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+function si(loop) { return G.selfIntersects(G.flatten(loop, 0.05)); }
+function ar(loop) { return Math.abs(G.signedArea(G.flatten(loop, 0.02))); }
+
+/* 栅格化刀具可达性。roi = 只在这个矩形内计量; 返回 mm2。
+ * step 默认 0.12mm: 再细就慢(单次 ~0.4s), 再粗则 dogbone 的圆会失真。 */
+function reach(outerNom, outerRel, roi, r, step) {
+  step = step || 0.12;
+  var pad = 2 * r + 3;                                  // 细节 (a)
+  var win = [roi[0] - pad, roi[1] - pad, roi[2] + pad, roi[3] + pad];
+  var W = Math.round((win[2] - win[0]) / step), H = Math.round((win[3] - win[1]) / step);
+  var pn = G.flatten(outerNom, 0.01), pr = G.flatten(outerRel, 0.01);
+  var matN = new Uint8Array(W * H), matR = new Uint8Array(W * H), i, j;
+  for (j = 0; j < H; j++) for (i = 0; i < W; i++) {
+    var p = { x: win[0] + (i + 0.5) * step, y: win[1] + (j + 0.5) * step };
+    matN[j * W + i] = G.pointInPoly(p, pn) ? 1 : 0;
+    matR[j * W + i] = G.pointInPoly(p, pr) ? 1 : 0;
+  }
+  var R = Math.max(1, Math.floor((r - step) / step)), disc = [];   // 细节 (b)
+  for (var dy = -R; dy <= R; dy++) for (var dx = -R; dx <= R; dx++) if (dx * dx + dy * dy <= R * R + 1e-9) disc.push([dx, dy]);
+  var er = new Uint8Array(W * H);
+  for (j = 0; j < H; j++) for (i = 0; i < W; i++) {
+    var ok = 1;
+    for (var k = 0; k < disc.length; k++) {
+      var x = i + disc[k][0], y = j + disc[k][1];
+      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+      if (matR[y * W + x]) { ok = 0; break; }
+    }
+    er[j * W + i] = ok;
+  }
+  var cut = new Uint8Array(W * H);
+  for (j = 0; j < H; j++) for (i = 0; i < W; i++) {
+    if (!er[j * W + i]) continue;
+    for (var k2 = 0; k2 < disc.length; k2++) {
+      var x2 = i + disc[k2][0], y2 = j + disc[k2][1];
+      if (x2 >= 0 && y2 >= 0 && x2 < W && y2 < H) cut[y2 * W + x2] = 1;
+    }
+  }
+  var bad = 0, sac = 0, voidA = 0;
+  for (j = 0; j < H; j++) for (i = 0; i < W; i++) {
+    var px = win[0] + (i + 0.5) * step, py = win[1] + (j + 0.5) * step;
+    if (px < roi[0] || px > roi[2] || py < roi[1] || py > roi[3]) continue;
+    var nn = matN[j * W + i], cc = cut[j * W + i];
+    if (!nn) { voidA++; if (!cc) bad++; } else if (cc) sac++;
+  }
+  var a = step * step;
+  return { bad: bad * a, sac: sac * a, voidA: voidA * a };
+}
+// 上边中央开一个 w x d 的方缺口(最典型的榫槽), 材料在下方, CCW
+function slot(w, d, W2, H2) {
+  W2 = W2 || 160; H2 = H2 || 60;
+  var cx = W2 / 2;
+  return [G.P(0, 0), G.P(W2, 0), G.P(W2, H2),
+    G.P(cx + w / 2, H2), G.P(cx + w / 2, H2 - d), G.P(cx - w / 2, H2 - d), G.P(cx - w / 2, H2),
+    G.P(0, H2)];
+}
+function roiOf(w, d, r, W2, H2) {
+  W2 = W2 || 160; H2 = H2 || 60;
+  var cx = W2 / 2;
+  return [cx - w / 2 - r - 1, H2 - d - r - 1, cx + w / 2 + r + 1, H2];
+}
+try {
+
+/* ============================================================
+ * 1. 核心功能: 让位必须真的让刀进得去(残料 -> 0)
+ * ============================================================ */
+[[24, 16], [20, 12], [12, 12]].forEach(function (sd) {
+  var w = sd[0], d = sd[1], nom = slot(w, d);
+  [1.6, 3.2].forEach(function (r) {
+    var roi = roiOf(w, d, r);
+    var base = reach(nom, nom, roi, r).bad;
+    // 先证明"不让位真的切不干净"(否则后面的断言是空跑)
+    chk('取证 缺口' + w + 'x' + d + ' 刀r=' + r + ': 不让位确有残料', base > 0.5, G.round(base, 2) + 'mm2');
+    ['dogbone', 'tbone'].forEach(function (ty) {
+      var rel = J.applyRelief(nom, r, ty);
+      var m = reach(nom, rel, roi, r);
+      chk('缺口' + w + 'x' + d + ' 刀r=' + r + ' ' + ty + ': 残料清零(方榫插得到底)',
+        m.bad < 0.05, G.round(m.bad, 3) + 'mm2 (不让位 ' + G.round(base, 2) + ')');
+      chk('缺口' + w + 'x' + d + ' 刀r=' + r + ' ' + ty + ': 不自交', !si(rel));
+      // 牺牲的材料必须有界: 一个角最多吃掉 ~pi*r^2, 两个角给 3 倍余量
+      chk('缺口' + w + 'x' + d + ' 刀r=' + r + ' ' + ty + ': 牺牲料有界(<=3pi r^2)',
+        m.sac <= 3 * Math.PI * r * r, G.round(m.sac, 2) + ' vs ' + G.round(3 * Math.PI * r * r, 2));
+    });
+  });
+});
+
+/* ============================================================
+ * 2. 缺陷 1 钉死: T-bone 耳长必须 >= 2r
+ * ============================================================ */
+(function () {
+  var w = 24, d = 16, r = 3.2, nom = slot(w, d), roi = roiOf(w, d, r);
+  // 旧实现等价物: earLen=1
+  var old1 = J.applyRelief(nom, r, 'tbone', { earLen: 1 });
+  var m1 = reach(nom, old1, roi, r);
+  var base = reach(nom, nom, roi, r).bad;
+  chk('取证: 耳长=1r(旧实现) 残料几乎没改善', m1.bad > base * 0.7,
+    G.round(m1.bad, 2) + ' vs 不让位 ' + G.round(base, 2));
+  var m15 = reach(nom, J.applyRelief(nom, r, 'tbone', { earLen: 1.5 }), roi, r);
+  chk('取证: 耳长=1.5r 仍有残料', m15.bad > 0.5, G.round(m15.bad, 2));
+  var m2 = reach(nom, J.applyRelief(nom, r, 'tbone', { earLen: 2 }), roi, r);
+  chk('耳长=2r 残料归零', m2.bad < 0.05, G.round(m2.bad, 3));
+  chk('默认耳长就是 2r', JSON.stringify(J.applyRelief(nom, r, 'tbone')) === JSON.stringify(J.applyRelief(nom, r, 'tbone', { earLen: 2 })));
+  // 耳长越长牺牲越多 -> 不能无脑加大
+  var s2 = reach(nom, J.applyRelief(nom, r, 'tbone', { earLen: 2 }), roi, r).sac;
+  var s3 = reach(nom, J.applyRelief(nom, r, 'tbone', { earLen: 3 }), roi, r).sac;
+  chk('耳长越长牺牲材料越多(2r 是最省的可行值)', s3 > s2, G.round(s2, 2) + ' -> ' + G.round(s3, 2));
+})();
+
+/* ============================================================
+ * 3. 缺陷 2 钉死: 邻边比 r 短时缩小 r, 不许整个跳过
+ * ============================================================ */
+(function () {
+  var r = 1.5875;
+  // 60 宽 x 1.0 深的浅缺口: 缺口底边长 60, 但两条侧边只有 1.0mm < r
+  var shallow = slot(60, 1.0);
+  ['dogbone', 'tbone'].forEach(function (ty) {
+    var rel = J.applyRelief(shallow, r, ty);
+    var removed = ar(shallow) - ar(rel);
+    chk('浅缺口(深1.0 < r) ' + ty + ': 仍然让位(旧版镂 0mm²)', removed > 0.3, G.round(removed, 3) + 'mm2');
+    chk('浅缺口 ' + ty + ': 不自交', !si(rel));
+    chk('浅缺口 ' + ty + ': stats 记录了缩小', rel.stats.shrunk > 0 || rel.stats.applied > 0,
+      JSON.stringify(rel.stats));
+    // 让位量必须被邻边限制住: 不能吃掉比缺口本身还多的料
+    chk('浅缺口 ' + ty + ': 让位量受邻边限制(不吃穿板)', removed < 60 * 1.0 * 3,
+      G.round(removed, 2));
+  });
+  // 极端: 深 0.05mm, 缩不动就该放弃并计入 skipped
+  var micro = slot(60, 0.05);
+  var rm = J.applyRelief(micro, r, 'tbone');
+  chk('极浅缺口(0.05mm): 放弃让位并计入 skipped', rm.stats.skipped > 0 || rm.stats.applied === 0,
+    JSON.stringify(rm.stats));
+  chk('极浅缺口: 不自交', !si(rm));
+})();
+
+/* ============================================================
+ * 4. 缺陷 3 钉死: 钝内角也要让位(旧版 turn<20° 全漏)
+ * ============================================================ */
+(function () {
+  var r = 1.5875;
+  /* V 形浅凹, 转角约 15°。
+   * 注意顶点的 y: 半宽 10 / 深 h 的 V 槽, 转角 = 2*atan(h/10) 的补角关系,
+   * h=1.336 -> 15.2°, h=2.7 -> 30.2°。写测试时把这两个搞混过一次。 */
+  var obtuse = [G.P(0, 0), G.P(100, 0), G.P(100, 40), G.P(60, 40), G.P(50, 38.664), G.P(40, 40), G.P(0, 40)];
+  ['dogbone', 'tbone'].forEach(function (ty) {
+    var rel = J.applyRelief(obtuse, r, ty);
+    chk('钝内角(转角~15°) ' + ty + ': 有让位', ar(obtuse) - ar(rel) > 0.3, G.round(ar(obtuse) - ar(rel), 3));
+    chk('钝内角 ' + ty + ': 不自交', !si(rel));
+  });
+  // minTurn 可调: 提高到 30° 就该跳过这个 15° 的角
+  var skipped = J.applyRelief(obtuse, r, 'tbone', { minTurn: 30 });
+  chk('minTurn=30 时 15° 的角被跳过', skipped.stats.applied === 0, JSON.stringify(skipped.stats));
+  // 真正共线的假角不许被当成内凹角
+  var straight = [G.P(0, 0), G.P(100, 0), G.P(100, 40), G.P(50, 40), G.P(0, 40)];
+  chk('共线点不产生让位', J.applyRelief(straight, r, 'dogbone').stats.applied === 0);
+})();
+
+/* ============================================================
+ * 5. 缺陷 4 钉死: 窄缺口两角争用同一条边 -> 绝不许自交
+ * ============================================================ */
+(function () {
+  // 6mm 宽缺口 + 刀 r=3.2: 两个角各要 3.2mm, 合计 6.4 > 6
+  [[6, 10, 3.2], [6, 20, 4], [5, 15, 4], [4, 8, 3.2], [3, 6, 3.2]].forEach(function (c) {
+    var w = c[0], d = c[1], r = c[2], nom = slot(w, d);
+    ['dogbone', 'tbone'].forEach(function (ty) {
+      var rel = J.applyRelief(nom, r, ty);
+      chk('窄缺口' + w + 'x' + d + ' 刀r=' + r + ' ' + ty + ': 不自交(旧版 dogbone 出废图)', !si(rel),
+        JSON.stringify(rel.stats));
+      // 让位不能把缺口两侧的料吃穿, 也不能超出板边
+      var b0 = G.loopBBox(nom), b1 = G.loopBBox(rel);
+      chk('窄缺口' + w + 'x' + d + ' ' + ty + ': 让位不越出板外形',
+        b1.x0 >= b0.x0 - 1e-6 && b1.x1 <= b0.x1 + 1e-6 && b1.y0 >= b0.y0 - 1e-6 && b1.y1 <= b0.y1 + 1e-6,
+        JSON.stringify([G.round(b1.x0, 2), G.round(b1.y0, 2), G.round(b1.x1, 2), G.round(b1.y1, 2)]));
+    });
+  });
+  // 刀比缺口宽得多时: 应当缩小/降级, 而不是产出废图
+  var tiny = slot(3, 6);
+  var big = J.applyRelief(tiny, 5, 'dogbone');
+  chk('刀(r=5)远宽于缺口(3mm): 不自交且有 stats 说明', !si(big) && big.stats !== undefined, JSON.stringify(big.stats));
+})();
+
+/* ============================================================
+ * 6. dogbone 的过切圆必须几何正确(以角点为心、半径 = r、270°)
+ * ============================================================ */
+(function () {
+  var r = 3;
+  // 直角内凹角(V 槽), 逐个转角检查
+  /* 只测到 45°: 更尖的 V 槽(30° -> 半宽 25/tan15° = 93mm)会宽到超出画布,
+   * 基线多边形本身就自交了, 测出来的"自交"是测试的锅不是代码的锅。
+   * 画布取 400 宽给足余量。 */
+  [90, 60, 45].forEach(function (turn) {
+    var dep = 25, th = turn * G.D2R, halfw = dep / Math.tan(th / 2);
+    var loop = [G.P(0, 0), G.P(400, 0), G.P(400, 60),
+      G.P(200 + halfw, 60), G.P(200, 60 - dep), G.P(200 - halfw, 60), G.P(0, 60)];
+    var rel = J.applyRelief(loop, r, 'dogbone');
+    var idx = -1;
+    for (var i = 0; i < rel.length; i++) if (rel[i].b) idx = i;
+    if (idx < 0) {
+      // 尖角被降级成 tbone 也是合法结果, 只要不自交
+      chk('V角' + turn + '°: 无弧则必须是降级到 tbone 且不自交', !si(rel) && rel.stats.degraded > 0,
+        JSON.stringify(rel.stats));
+      return;
+    }
+    var a = G.arcFromBulge(rel[idx], rel[(idx + 1) % rel.length], rel[idx].b);
+    var C = G.P(200, 60 - dep);
+    /* 扫掠角 = 180 + turn(不是恒 270!)。落点固定在 C-a*r 与 C+b*r,
+     * 弦长 = 2r*cos(turn/2), 要让反算半径 = r 就必须 sin(|sweep|/2) = cos(turn/2)。
+     * 旧版硬编码 -270°, 于是 turn=60 时反算出 R=3.674 且圆心偏离角点 1.098mm。 */
+    chk('V角' + turn + '°: 过切角 = 180+转角', near(Math.abs(a.sweep * G.R2D), 180 + turn, 0.5),
+      G.round(a.sweep * G.R2D, 2) + ' 应 ' + (-(180 + turn)));
+    chk('V角' + turn + '°: 圆心正好在尖点', Math.hypot(a.cx - C.x, a.cy - C.y) < 0.02,
+      G.round(Math.hypot(a.cx - C.x, a.cy - C.y), 4));
+    chk('V角' + turn + '°: 半径 = 刀半径', near(a.r, r, 0.02), G.round(a.r, 4));
+    chk('V角' + turn + '°: 不自交', !si(rel));
+  });
+})();
+
+/* ============================================================
+ * 7. 刀径可自定义: 让位量必须随刀径单调变化
+ * ============================================================ */
+(function () {
+  var nom = slot(30, 20);
+  ['dogbone', 'tbone'].forEach(function (ty) {
+    var prev = -1, mono = true, seq = [];
+    [1.0, 1.5875, 2, 3.175, 4, 5].forEach(function (r) {
+      var rel = J.applyRelief(nom, r, ty);
+      var rm = ar(nom) - ar(rel);
+      seq.push(G.round(rm, 2));
+      if (rm <= prev) mono = false;
+      prev = rm;
+      if (si(rel)) mono = false;
+    });
+    chk(ty + ': 让位量随刀径严格单调递增且始终不自交', mono, seq.join(' < '));
+  });
+  // 常见刀径都要能干净切出 20x12 缺口
+  [3.175, 4, 6, 6.35, 8].forEach(function (dia) {
+    var r = dia / 2, nom2 = slot(24, 16), roi = roiOf(24, 16, r);
+    ['dogbone', 'tbone'].forEach(function (ty) {
+      var m = reach(nom2, J.applyRelief(nom2, r, ty), roi, r);
+      chk('刀径 ' + dia + 'mm ' + ty + ': 24x16 缺口切干净', m.bad < 0.08, G.round(m.bad, 3));
+    });
+  });
+})();
+
+/* ============================================================
+ * 8. 不变量: 凸角不动 / none 是恒等 / stats 守恒
+ * ============================================================ */
+(function () {
+  var r = 2;
+  chk('纯矩形(全凸角)不被改动', J.applyRelief(G.rect(0, 0, 50, 50), r, 'dogbone').length === 4);
+  chk('纯矩形 stats.applied = 0', J.applyRelief(G.rect(0, 0, 50, 50), r, 'tbone').stats.applied === 0);
+  var nom = slot(24, 16);
+  chk("type='none' 是恒等变换", J.applyRelief(nom, r, 'none').length === nom.length);
+  chk('r=0 是恒等变换', J.applyRelief(nom, 0, 'dogbone').length === nom.length);
+  chk('恒等变换也带 stats', J.applyRelief(nom, 0, 'dogbone').stats.applied === 0);
+  // 方缺口正好 2 个内凹角
+  chk('方缺口 = 2 个内凹角', J.applyRelief(nom, r, 'tbone').stats.applied === 2,
+    JSON.stringify(J.applyRelief(nom, r, 'tbone').stats));
+  // 面积只减不增(让位永远是"多切掉料")
+  ['dogbone', 'tbone'].forEach(function (ty) {
+    chk(ty + ': 面积只减不增', ar(J.applyRelief(nom, r, ty)) < ar(nom));
+  });
+  // 孔(CW 环)上让位: 孔应变大
+  var hole = G.ensureOrient(G.rect(10, 10, 24, 12.2), false);
+  ['dogbone', 'tbone'].forEach(function (ty) {
+    var rel = J.applyRelief(hole, r, ty);
+    chk('榫眼孔 ' + ty + ': 孔变大(让位往料里让)', ar(rel) > ar(hole), G.round(ar(rel) - ar(hole), 2));
+    chk('榫眼孔 ' + ty + ': 仍是 CW', G.loopArea(rel) < 0);
+    chk('榫眼孔 ' + ty + ': 不自交', !si(rel));
+    chk('榫眼孔 ' + ty + ': 4 个角全让位', rel.stats.applied === 4, JSON.stringify(rel.stats));
+  });
+  // 大刀对小榫眼: 不许出废图
+  var r7 = J.applyRelief(hole, 7, 'dogbone');
+  chk('刀 r=7 对 24x12.2 榫眼: 不自交(旧版自交)', !si(r7), JSON.stringify(r7.stats));
+  // 确定性
+  chk('确定性: 两次调用结果一致',
+    JSON.stringify(J.applyRelief(nom, 3.1, 'dogbone')) === JSON.stringify(J.applyRelief(nom, 3.1, 'dogbone')));
+  // 圆弧端点相邻的内角不做让位(已是圆角)
+  var withArc = [G.P(0, 0), G.P(100, 0), G.P(100, 40), G.P(60, 40),
+    G.P(60, 28, G.bulgeOf(90)), G.P(52, 20), G.P(40, 20), G.P(40, 40), G.P(0, 40)];
+  var wa = J.applyRelief(withArc, 1.5875, 'dogbone');
+  chk('圆弧端点旁的角跳过让位', !si(wa) && wa.stats.applied >= 1, JSON.stringify(wa.stats));
+})();
+
+/* ============================================================
+ * 9. 真实零件: 榫齿边 + 整套家具, 任何刀径都不许出废图
+ * ============================================================ */
+(function () {
+  var sp = J.spansFor(120, { t: 12, m: 5, phase: 0 });
+  var prof = J.tabProfile(sp, 12, { fit: 0.2 });
+  var f = G.frame(G.P(0, 0), G.P(120, 0));
+  var pts = [G.P(0, 0)];
+  f.map(prof).forEach(function (p) { pts.push(p); });
+  pts.push(G.P(120, 0), G.P(120, 80), G.P(0, 80));
+  var edge = G.cleanLoop(pts);
+  [1.5875, 3.175, 6].forEach(function (r) {
+    ['dogbone', 'tbone'].forEach(function (ty) {
+      var rel = J.applyRelief(edge, r, ty);
+      chk('真实榫齿边(5格) 刀r=' + r + ' ' + ty + ': 不自交且有让位',
+        !si(rel) && ar(edge) - ar(rel) > 0, JSON.stringify(rel.stats));
+    });
+  });
+  // 整套家具: 每个零件都必须合法
+  [1.5875, 3.175, 5].forEach(function (r) {
+    ['dogbone', 'tbone'].forEach(function (ty) {
+      var res = Models.box({
+        thickness: 15, width: 600, depth: 320, height: 720,
+        fit: 0.2, shelves: 2, relief: r, reliefType: ty
+      });
+      var errs = [];
+      res.parts.forEach(function (pt) {
+        pt.validate().forEach(function (m) { if (m.level === 'error') errs.push(pt.name + ':' + m.text); });
+      });
+      chk('箱体柜 刀r=' + r + ' ' + ty + ': ' + res.parts.length + ' 个零件全合法',
+        errs.length === 0 && res.parts.length >= 5, errs.slice(0, 2).join(' | '));
+    });
+  });
+  // 极端刀径(比板厚还大)也不能崩
+  var wild = Models.box({ thickness: 15, width: 600, depth: 320, height: 720, fit: 0.2, relief: 20, reliefType: 'dogbone' });
+  var werr = [];
+  wild.parts.forEach(function (pt) { pt.validate().forEach(function (m) { if (m.level === 'error') werr.push(pt.name + ':' + m.text); }); });
+  chk('刀 r=20mm(荒谬值): 不崩且零件仍合法', werr.length === 0, werr.slice(0, 2).join(' | '));
+})();
+
+} catch (e) { chk('EXCEPTION ' + e.message, false, e.stack); }
+var fails = L.filter(function (s) { return /^FAIL/.test(s); });
+document.getElementById('out').textContent =
+  'TOTAL ' + L.length + '   FAILS ' + fails.length + '\n\n' + L.join('\n');
+document.title = (fails.length ? 'FAIL ' + fails.length : 'ALL PASS') + ' · 让位';
+</script>
+</body></html>

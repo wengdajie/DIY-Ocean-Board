@@ -1,0 +1,1194 @@
+<!doctype html><meta charset="utf-8"><body><pre id="out">running</pre>
+<script src="../js/geom.js"></script><script src="../js/joints.js"></script>
+<script src="../js/part.js"></script><script src="../js/models.js"></script>
+<script src="../js/imagetrace.js"></script><script src="../js/imagemodel.js"></script>
+<script src="../js/features.js"></script><script src="../js/custom.js"></script>
+<script src="../js/cutlist.js"></script><script src="../js/nest.js"></script>
+<script src="../js/render.js"></script>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+function mk(w, h, draw) {
+  var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  var g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#000'; draw(g);
+  return g.getImageData(0, 0, w, h);
+}
+function errsOf(parts) {
+  var e = [];
+  parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') e.push(p.name + ':' + m.text); }); });
+  return e;
+}
+try {
+/* =========== A. Custom.intersect 空间求解 =========== */
+var t = 15;
+var side = { plane: 'YZ', at: t / 2, u0: 0, u1: 300, v0: 0, v1: 700 };
+var shelf = { plane: 'XY', at: 350, u0: t, u1: 585, v0: 0, v1: 300 };
+var it = Custom.intersect(shelf, side, t);
+chk('层板×侧板 相交', !!it, it ? it.axis + ' ' + JSON.stringify(it.range.map(function (v) { return G.round(v, 2); })) : 'null');
+chk('交线沿 y(深度)', it && it.axis === 'y', it && it.axis);
+var far = { plane: 'XY', at: 350, u0: 500, u1: 585, v0: 0, v1: 300 };
+chk('不相交返回 null', Custom.intersect(far, side, t) === null);
+chk('同平面返回 null', Custom.intersect(shelf, { plane: 'XY', at: 100, u0: 0, u1: 100, v0: 0, v1: 100 }, t) === null);
+
+/* =========== B. Custom.build 基础柜 =========== */
+var r = Custom.build({
+  thickness: t, fit: 0.2, tenonCount: 3,
+  panels: [
+    { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: 300, v0: 0, v1: 700 },
+    { id: 'R', name: '右侧板', plane: 'YZ', at: 600 - t / 2, u0: 0, u1: 300, v0: 0, v1: 700 },
+    { id: 'B', name: '底板', plane: 'XY', at: t / 2, u0: t, u1: 600 - t, v0: 0, v1: 300 },
+    { id: 'T', name: '顶板', plane: 'XY', at: 700 - t / 2, u0: t, u1: 600 - t, v0: 0, v1: 300 },
+    { id: 'S', name: '层板', plane: 'XY', at: 350, u0: t, u1: 600 - t, v0: 0, v1: 300 }
+  ]
+});
+chk('build 生成 5 块板', r.parts.length === 5, r.parts.map(function (p) { return p.name; }).join('/'));
+chk('build 求出榫接', r.info.tenonJoints > 0, JSON.stringify(r.info));
+chk('build 零件全部合法', errsOf(r.parts).length === 0, errsOf(r.parts).slice(0, 3).join(' | '));
+var byName = {}; r.parts.forEach(function (p) { byName[p.name] = p; });
+chk('侧板有榫眼', byName['左侧板'].holes.length > 0, byName['左侧板'].holes.length);
+chk('层板出了榫(宽度>净宽)', byName['层板'].bbox().w > 600 - 2 * t, G.round(byName['层板'].bbox().w, 1));
+chk('层板榫头长=板厚(两侧共+2t)', near(byName['层板'].bbox().w, 600 - 2 * t + 2 * t, 1e-6), G.round(byName['层板'].bbox().w, 2));
+// 榫眼宽度应为 t+fit
+var mh = G.loopBBox(byName['左侧板'].holes[0]);
+chk('榫眼厚度方向 = t+fit', near(Math.min(mh.w, mh.h), t + 0.2, 1e-6), G.round(Math.min(mh.w, mh.h), 3));
+
+/* =========== C. 榫与眼真实对位(自定义结构) =========== */
+// 层板画布 x = 世界u - u0(=t); 右侧板画布 x = 世界y(深度) - u0(=0)
+// 层板右边榫头的外端面在 x = (585-15) + t = 585, 与右侧板榫眼的画布 x 同为"深度"坐标 => 可直接比
+// 注意: 不用扫描线量榫头(量化误差 ±0.15mm 远大于 fit/2=0.1mm), 直接取顶点精确值。
+function faceSpans(loop, axis, faceVal, tol) {
+  tol = tol || 1e-6;
+  var oth = axis === 'x' ? 'y' : 'x';
+  var out = [];
+  for (var i = 0; i < loop.length; i++) {
+    var a = loop[i], b = loop[(i + 1) % loop.length];
+    if (Math.abs(a[axis] - faceVal) > tol || Math.abs(b[axis] - faceVal) > tol) continue;
+    if (a.b) continue;                                  // 只认直线段
+    var lo = Math.min(a[oth], b[oth]), hi = Math.max(a[oth], b[oth]);
+    if (hi - lo > 1e-6) out.push([lo, hi]);
+  }
+  return out.sort(function (p, q) { return p[0] - q[0]; });
+}
+var sh = byName['层板'], rs = byName['右侧板'];
+var shTabs = faceSpans(sh.outer, 'x', (600 - 2 * t) + t, 1e-6);
+var rsHoles = rs.holes.map(function (h) { return G.loopBBox(h); })
+  .filter(function (b) { return near(Math.min(b.w, b.h), t + 0.2, 0.01); })
+  .sort(function (a, b) { return a.x0 - b.x0; });
+chk('层板右边有榫头', shTabs.length > 0, shTabs.length + ' ' + JSON.stringify(shTabs.map(function (g) { return [G.round(g[0], 3), G.round(g[1], 3)]; })));
+chk('右侧板有对应榫眼', rsHoles.length >= shTabs.length, rsHoles.length);
+// 榫头本身应被两侧各收窄 fit/4 => 净宽 = span - fit/2
+var mateOk = 0, why = [];
+shTabs.forEach(function (tb) {
+  var found = rsHoles.filter(function (h) { return tb[0] > h.x0 - 1 && tb[1] < h.x1 + 1; })[0];
+  if (!found) { why.push('榫[' + G.round(tb[0], 2) + ',' + G.round(tb[1], 2) + ']无眼'); return; }
+  var c0 = tb[0] - found.x0, c1 = found.x1 - tb[1];
+  if (near(c0, 0.1, 0.01) && near(c1, 0.1, 0.01)) mateOk++;
+  else why.push('间隙' + G.round(c0, 4) + '/' + G.round(c1, 4));
+});
+chk('自定义结构: 榫与眼逐个对位(单侧间隙 fit/2)', mateOk === shTabs.length && shTabs.length > 0 && !why.length, mateOk + '/' + shTabs.length + ' ' + why.slice(0, 2).join(';'));
+// 总配合间隙 = fit (两侧之和), 这是"能敲进去且不晃"的关键
+var totOk = shTabs.every(function (tb) {
+  var h = rsHoles.filter(function (q) { return tb[0] > q.x0 - 1 && tb[1] < q.x1 + 1; })[0];
+  return h && near((h.x1 - h.x0) - (tb[1] - tb[0]), 0.2, 0.01);
+});
+chk('自定义结构: 总配合间隙 = fit', totOk && shTabs.length > 0,
+  shTabs.length ? G.round((rsHoles[0].x1 - rsHoles[0].x0) - (shTabs[0][1] - shTabs[0][0]), 4) : 'n/a');
+// 榫头长度 = 板厚(通榫齐平)
+chk('榫头长度 = 板厚', near(sh.bbox().x1 - (600 - 2 * t), t, 1e-6), G.round(sh.bbox().x1 - (600 - 2 * t), 4));
+
+/* =========== D. shelfUnit 不规则格柜 =========== */
+var su = Custom.shelfUnit({
+  thickness: 15, width: 900, depth: 320, height: 900,
+  dividers: [300, 600], shelvesPerBay: [2, 1, 3], fit: 0.2
+});
+chk('shelfUnit 板数 = 4框+2隔+6层', su.parts.length === 4 + 2 + 6, su.parts.length);
+chk('shelfUnit 全部合法', errsOf(su.parts).length === 0, errsOf(su.parts).slice(0, 3).join(' | '));
+chk('shelfUnit 有榫接', su.info.tenonJoints >= 6, su.info.tenonJoints);
+chk('shelfUnit 各列层板数不同', su.parts.filter(function (p) { return /层板1-/.test(p.name); }).length === 2 &&
+  su.parts.filter(function (p) { return /层板2-/.test(p.name); }).length === 1 &&
+  su.parts.filter(function (p) { return /层板3-/.test(p.name); }).length === 3, su.parts.map(function (p) { return p.name; }).join(','));
+// 排样可用
+var nn = Nest.nest(su.parts.map(function (p) { return { part: p, qty: 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 });
+chk('shelfUnit 可排样', Nest.verify(nn, { margin: 10 }).length === 0 && nn.oversize.length === 0, 'sheets=' + nn.sheets.length);
+chk('shelfUnit 可导出 DXF', CAD.toDXF(su.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0);
+// 少于 2 块板应报错
+chk('板数不足报错', Custom.build({ thickness: 15, panels: [{ plane: 'XY', at: 0, u0: 0, u1: 100, v0: 0, v1: 100 }] }).warnings.some(function (m) { return m.level === 'error'; }));
+chk('未知平面被拒', Custom.build({ thickness: 15, panels: [{ plane: 'ZZ', at: 0, u0: 0, u1: 100, v0: 0, v1: 100 }, { plane: 'XY', at: 0, u0: 0, u1: 100, v0: 0, v1: 100 }] }).warnings.some(function (m) { return /未知平面/.test(m.text); }));
+
+/* =========== E. 图片 -> 轮廓件 =========== */
+var star = mk(300, 300, function (g) {
+  g.beginPath();
+  for (var k = 0; k < 10; k++) {
+    var a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? 55 : 130;
+    var x = 150 + rr * Math.cos(a), y = 150 + rr * Math.sin(a);
+    k ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.closePath(); g.fill();
+});
+var si = ImageModel.silhouette(star, { thickness: 12, targetWidth: 240, fit: 0.2, simplify: 1.0 });
+chk('轮廓件生成 1 件', si.parts.length === 1, si.parts.length);
+chk('轮廓件合法', errsOf(si.parts).length === 0, errsOf(si.parts).slice(0, 2).join('|'));
+chk('轮廓件宽度 = targetWidth', near(si.parts[0].bbox().w, 240, 1.5), G.round(si.parts[0].bbox().w, 2));
+chk('五角星顶点数合理(10~40)', si.parts[0].outer.length >= 10 && si.parts[0].outer.length <= 40, si.parts[0].outer.length);
+chk('轮廓件 info', si.info.mode === '轮廓件' && si.info.pxPerMM > 0, JSON.stringify(si.info));
+
+// 等比缩放: 同时给宽高取小者
+var si2 = ImageModel.silhouette(star, { thickness: 12, targetWidth: 400, targetHeight: 100 });
+chk('等比缩放取小者', near(si2.parts[0].bbox().h, 100, 2), G.round(si2.parts[0].bbox().h, 1));
+
+// 带孔图形: 甜甜圈
+var donut = mk(200, 200, function (g) {
+  g.beginPath(); g.arc(100, 100, 80, 0, 7); g.fill();
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(100, 100, 35, 0, 7); g.fill();
+});
+var di = ImageModel.silhouette(donut, { thickness: 12, targetWidth: 160 });
+chk('甜甜圈: 1 件带 1 孔', di.parts.length === 1 && di.parts[0].holes.length === 1,
+  di.parts.length + '件/' + (di.parts[0] ? di.parts[0].holes.length : 0) + '孔');
+chk('甜甜圈孔方向 CW', di.parts[0].holes.length && G.loopArea(di.parts[0].holes[0]) < 0);
+var dArea = Math.abs(di.parts[0].area());
+var dTrue = Math.PI * (80 * 80 - 35 * 35) * Math.pow(160 / 160, 2);
+chk('甜甜圈净面积合理', Math.abs(dArea - dTrue) / dTrue < 0.06, G.round(dArea, 0) + ' vs ' + G.round(dTrue, 0));
+
+// 自动榫头 + 底座
+var tree = mk(200, 260, function (g) {
+  g.beginPath(); g.moveTo(100, 10); g.lineTo(170, 190); g.lineTo(30, 190); g.closePath(); g.fill();
+  g.fillRect(85, 190, 30, 60);   // 树干(着地)
+});
+var ti = ImageModel.silhouette(tree, {
+  thickness: 12, targetHeight: 300, standStyle: 'tenon', fit: 0.2, tenonWidth: 30, baseDepth: 80
+});
+chk('带底座: 2 件', ti.parts.length === 2, ti.parts.map(function (p) { return p.name; }).join('/'));
+chk('底座在最后', ti.parts[ti.parts.length - 1].name === '底座');
+chk('生成了榫头', ti.info.tenons > 0, ti.info.tenons);
+chk('底座有榫眼', ti.parts[1].holes.length === ti.info.tenons, ti.parts[1].holes.length);
+chk('带底座零件全合法', errsOf(ti.parts).length === 0, errsOf(ti.parts).slice(0, 2).join('|'));
+// 榫眼宽 = t + fit
+var bh = G.loopBBox(ti.parts[1].holes[0]);
+chk('底座榫眼厚度 = t+fit', near(Math.min(bh.w, bh.h), 12 + 0.2, 0.01), G.round(Math.min(bh.w, bh.h), 3));
+// 轮廓件底部应伸出榫头(超过主体最低点)
+chk('轮廓件含榫头凸起', ti.parts[0].outer.length > 4);
+
+// 反相
+var invImg = mk(120, 120, function (g) { g.fillRect(0, 0, 120, 120); g.fillStyle = '#fff'; g.fillRect(30, 30, 60, 60); });
+var iv = ImageModel.silhouette(invImg, { thickness: 12, targetWidth: 100, invert: true });
+chk('invert 提取白色区域', iv.parts.length === 1 && near(iv.parts[0].bbox().w, 100, 2), iv.parts.length + ' ' + (iv.parts[0] ? G.round(iv.parts[0].bbox().w, 1) : ''));
+// 空白图报错
+chk('空白图报错', ImageModel.silhouette(mk(80, 80, function () { }), { thickness: 12 }).warnings.some(function (m) { return m.level === 'error'; }));
+// 多形状限制
+var many = mk(400, 100, function (g) { for (var k = 0; k < 6; k++) g.fillRect(10 + k * 60, 20, 40, 60); });
+var mi = ImageModel.silhouette(many, { thickness: 12, targetWidth: 380, maxParts: 3 });
+chk('maxParts 限制件数', mi.parts.length === 3, mi.parts.length);
+chk('超出时给出提示', mi.warnings.some(function (m) { return /只保留最大/.test(m.text); }));
+
+/* =========== F. 图片 -> 等高分层 =========== */
+var ramp = mk(200, 200, function (g) {
+  // 同心方块: 越里越黑 -> 应分出层层缩小的台阶
+  g.fillStyle = '#e0e0e0'; g.fillRect(20, 20, 160, 160);
+  g.fillStyle = '#909090'; g.fillRect(50, 50, 100, 100);
+  g.fillStyle = '#404040'; g.fillRect(75, 75, 50, 50);
+  g.fillStyle = '#000';    g.fillRect(90, 90, 20, 20);
+});
+var la = ImageModel.layers(ramp, { thickness: 9, layerCount: 4, targetWidth: 200, invert: false, pinDia: 0 });
+chk('分层生成零件', la.parts.length >= 4, la.parts.length + ' ' + la.parts.map(function (p) { return p.name; }).join(','));
+chk('分层零件合法', errsOf(la.parts).length === 0, errsOf(la.parts).slice(0, 3).join('|'));
+chk('分层 info', la.info.mode === '等高分层' && la.info.layerCount === 4, JSON.stringify(la.info));
+chk('总高 = 层数 x 板厚', near(la.info.totalHeight, 36, 1e-9), la.info.totalHeight);
+// 面积应逐层递减(台阶)
+var byLayer = {};
+la.parts.forEach(function (p) {
+  var m = p.name.match(/第(\d+)层/);
+  if (m) byLayer[m[1]] = (byLayer[m[1]] || 0) + Math.abs(p.area());
+});
+var keys = Object.keys(byLayer).sort(function (a, b) { return a - b; });
+var mono = true, seq = [];
+keys.forEach(function (k, i) {
+  seq.push(G.round(byLayer[k], 0));
+  if (i && byLayer[k] > byLayer[keys[i - 1]] + 1) mono = false;
+});
+chk('各层面积逐层递减(台阶形)', mono && keys.length >= 3, seq.join(' > '));
+// 对位销孔
+var lp = ImageModel.layers(ramp, { thickness: 9, layerCount: 3, targetWidth: 200, pinDia: 6 });
+var pinned = lp.parts.filter(function (p) {
+  return p.holes.some(function (h) { var b = G.loopBBox(h); return near(b.w, 6.2, 0.3) && near(b.h, 6.2, 0.3); });
+});
+chk('分层生成对位销孔', pinned.length === lp.parts.length, pinned.length + '/' + lp.parts.length);
+chk('销孔零件仍合法', errsOf(lp.parts).length === 0, errsOf(lp.parts).slice(0, 2).join('|'));
+chk('分层可排样与导出', (function () {
+  var n2 = Nest.nest(lp.parts.map(function (p) { return { part: p, qty: 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 });
+  return Nest.verify(n2, { margin: 10 }).length === 0 && CAD.toDXF(lp.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0;
+})());
+chk('分层空图报错', ImageModel.layers(mk(60, 60, function () { }), { thickness: 9 }).warnings.some(function (m) { return m.level === 'error'; }));
+
+/* =========== G. Feat 加工特征 =========== */
+// G1 洞洞板阵列
+var pb = Feat.pegboard(400, 300, { dia: 12, pitch: 40, margin: 30 });
+chk('洞洞板 行列/孔数', pb.cols === 9 && pb.rows === 6 && pb.count === 54, pb.cols + 'x' + pb.rows + '=' + pb.count);
+var pbb = pb.holes.map(function (l) { return G.loopBBox(l); });
+var pxs = pbb.map(function (b) { return b.x0; }), pxe = pbb.map(function (b) { return b.x1; });
+var pys = pbb.map(function (b) { return b.y0; }), pye = pbb.map(function (b) { return b.y1; });
+chk('洞洞板阵列左右居中',
+  near(Math.min.apply(null, pxs), 400 - Math.max.apply(null, pxe), 1e-6),
+  G.round(Math.min.apply(null, pxs), 4) + ' vs ' + G.round(400 - Math.max.apply(null, pxe), 4));
+chk('洞洞板阵列上下居中',
+  near(Math.min.apply(null, pys), 300 - Math.max.apply(null, pye), 1e-6),
+  G.round(Math.min.apply(null, pys), 4) + ' vs ' + G.round(300 - Math.max.apply(null, pye), 4));
+chk('洞洞板孔全为 CW(内孔)', pb.holes.every(function (l) { return G.loopArea(l) < 0; }));
+chk('洞洞板留边过大 -> 0 孔', Feat.pegboard(400, 300, { dia: 12, pitch: 40, margin: 190 }).count === 0,
+  Feat.pegboard(400, 300, { dia: 12, pitch: 40, margin: 190 }).count);
+chk('洞洞板孔距太密报警', Feat.pegboard(400, 300, { dia: 12, pitch: 13 }).warnings.some(function (m) { return /崩边/.test(m.text); }));
+// 孔距翻倍 -> 孔数应显著减少(用户改孔距要看得见变化)
+var pbA = Feat.pegboard(600, 400, { dia: 10, pitch: 30, margin: 20 });
+var pbB = Feat.pegboard(600, 400, { dia: 10, pitch: 60, margin: 20 });
+chk('孔距翻倍孔数约 1/4', pbB.count < pbA.count / 3, pbA.count + ' -> ' + pbB.count);
+// 错排: 奇数行少一个孔, 且仍左右对称
+var pst = Feat.pegboard(400, 300, { dia: 10, pitch: 40, margin: 30, stagger: true });
+var row2 = pst.positions.filter(function (q) { return q.row === 2; });
+var row1 = pst.positions.filter(function (q) { return q.row === 1; });
+chk('错排奇数行少 1 孔', row2.length === row1.length - 1, row1.length + '/' + row2.length);
+chk('错排仍左右对称',
+  near(row2[0].x - Math.min.apply(null, row1.map(function (q) { return q.x; })),
+       Math.max.apply(null, row1.map(function (q) { return q.x; })) - row2[row2.length - 1].x, 1e-6));
+// 局部删孔
+var pskip = Feat.pegboard(400, 300, { dia: 12, pitch: 40, margin: 30, skip: [[1, 1], [2, 3]] });
+chk('skip 删指定孔', pskip.count === pb.count - 2, pskip.count);
+
+// G2 四角处理: 面积不变量 + 顺序关系
+var A0 = 200 * 100;
+var rr = Feat.panelOutline(200, 100, { corners: { all: { type: 'round', size: 10 } } });
+chk('圆角面积 = A-4(s²-πs²/4)', near(G.loopArea(rr), A0 - 4 * (100 - Math.PI * 25), 1e-6), G.round(G.loopArea(rr), 4));
+var nn2 = Feat.panelOutline(200, 100, { corners: { all: { type: 'notch', size: 10 } } });
+chk('方角切口面积 = A-4s²', near(G.loopArea(nn2), A0 - 4 * 100, 1e-6), G.round(G.loopArea(nn2), 4));
+var cf = Feat.panelOutline(200, 100, { corners: { all: { type: 'chamfer', size: 10 } } });
+chk('斜角面积 = A-4·s²/2', near(G.loopArea(cf), A0 - 4 * 50, 1e-6), G.round(G.loopArea(cf), 4));
+chk('去料量 notch > chamfer > round',
+  G.loopArea(nn2) < G.loopArea(cf) && G.loopArea(cf) < G.loopArea(rr),
+  [G.round(G.loopArea(nn2), 1), G.round(G.loopArea(cf), 1), G.round(G.loopArea(rr), 1)].join(' < '));
+chk('四角轮廓 CCW 且不自交',
+  [rr, nn2, cf].every(function (l) { return G.loopArea(l) > 0 && !G.selfIntersects(l); }));
+// 只处理单角
+var one = Feat.panelOutline(200, 100, { corners: { tr: { type: 'notch', size: 20 } } });
+chk('单角切口只吃 1 个角', near(G.loopArea(one), A0 - 400, 1e-6), G.round(G.loopArea(one), 3));
+// size 超过半边 -> 被夹紧, 不产生非法轮廓
+var big = Feat.panelOutline(200, 100, { corners: { all: { type: 'chamfer', size: 999 } } });
+chk('过大角尺寸被夹紧', G.loopArea(big) > 0 && !G.selfIntersects(big), G.round(G.loopArea(big), 1));
+
+// G3 边缺口 / 冲突消解
+chk('边缺口重叠 -> conflict', Feat.edgeConflict([Feat.notchProfile(10, 40, 20), Feat.notchProfile(30, 40, 20)]) === true);
+chk('边缺口不重叠 -> ok', Feat.edgeConflict([Feat.notchProfile(10, 20, 20), Feat.notchProfile(40, 20, 20)]) === false);
+chk('相邻贴合(首尾相接)不算冲突', Feat.edgeConflict([Feat.notchProfile(10, 20, 20), Feat.notchProfile(30, 20, 20)]) === false);
+// resolveEdge: 乱序输入必须按 u 升序输出(这是"轮廓折回自己"那个 bug 的根因)
+var rv = Feat.resolveEdge([Feat.notchProfile(200, 20, 10), Feat.notchProfile(50, 20, 10), Feat.notchProfile(120, 20, 10)]);
+var us = rv.prof.map(function (q) { return q.u; });
+var sorted = true;
+for (var iu = 1; iu < us.length; iu++) if (us[iu] < us[iu - 1] - 1e-9) sorted = false;
+chk('resolveEdge 输出按 u 升序', sorted && rv.kept === 3 && rv.dropped.length === 0, us.join(','));
+var rv2 = Feat.resolveEdge([Feat.notchProfile(10, 40, 10), Feat.notchProfile(30, 40, 10), Feat.notchProfile(100, 20, 10)]);
+chk('resolveEdge 丢弃重叠段', rv2.kept === 2 && rv2.dropped.length === 1, 'kept ' + rv2.kept + ' dropped ' + JSON.stringify(rv2.dropped));
+chk('resolveEdge 保留段仍升序不重叠', (function () {
+  var u2 = rv2.prof.map(function (q) { return q.u; }), ok = true;
+  for (var i = 1; i < u2.length; i++) if (u2[i] < u2[i - 1] - 1e-9) ok = false;
+  return ok;
+})(), rv2.prof.map(function (q) { return q.u; }).join(','));
+// 乱序边缺口生成的板必须合法(回归)
+var ord = new Part('乱序缺口板', 15);
+ord.setOuter(Feat.panelOutline(400, 200, { edges: { bottom: Feat.resolveEdge([Feat.notchProfile(300, 30, 20), Feat.notchProfile(60, 30, 20)]).prof } }));
+chk('乱序边缺口板合法', errsOf([ord]).length === 0, errsOf([ord]).join('|'));
+chk('乱序边缺口面积精确', near(Math.abs(ord.area()), 400 * 200 - 2 * 30 * 20, 1e-6), G.round(Math.abs(ord.area()), 3));
+
+// G4 孔位 ref 基准换算
+var hs = Feat.holesFromSpec([
+  { type: 'circle', d: 10, x: 30, y: 30 },
+  { type: 'circle', d: 10, ref: 'tr', x: -30, y: -30 },
+  { type: 'rect', ref: 'center', x: 0, y: 0, w: 60, h: 20, r: 5 },
+  { type: 'slot', ref: 'center', x: 0, y: 60, len: 80, d: 12, ang: 90 }
+], 400, 200, { minEdge: 3 });
+chk('孔位 4 个全生成', hs.holes.length === 4, hs.holes.length + ' warn:' + hs.warnings.length);
+var hb0 = G.loopBBox(hs.holes[0]), hb1 = G.loopBBox(hs.holes[1]);
+chk('ref=bl 落在左下', near((hb0.x0 + hb0.x1) / 2, 30, 1e-6) && near((hb0.y0 + hb0.y1) / 2, 30, 1e-6));
+chk('ref=tr 落在右上镜像位', near((hb1.x0 + hb1.x1) / 2, 370, 1e-6) && near((hb1.y0 + hb1.y1) / 2, 170, 1e-6),
+  G.round((hb1.x0 + hb1.x1) / 2, 2) + ',' + G.round((hb1.y0 + hb1.y1) / 2, 2));
+var hb3 = G.loopBBox(hs.holes[3]);
+chk('腰形孔 ang=90 长轴转到 y', near(hb3.h, 80, 1e-6) && near(hb3.w, 12, 1e-6), G.round(hb3.w, 2) + 'x' + G.round(hb3.h, 2));
+chk('孔全为 CW', hs.holes.every(function (l) { return G.loopArea(l) < 0; }));
+var hout = Feat.holesFromSpec([{ type: 'circle', d: 40, x: 5, y: 5 }], 400, 200, { minEdge: 3 });
+chk('越板边孔被丢弃并报 error', hout.holes.length === 0 && hout.warnings.some(function (m) { return m.level === 'error'; }));
+var hnear = Feat.holesFromSpec([{ type: 'circle', d: 10, x: 7, y: 100 }], 400, 200, { minEdge: 10 });
+chk('近边孔保留但报 warn', hnear.holes.length === 1 && hnear.warnings.some(function (m) { return m.level === 'warn'; }));
+chk('非法尺寸孔跳过', Feat.holesFromSpec([{ type: 'circle', d: 0 }, { type: 'rect', w: 10, h: 0 }, { type: 'slot', len: 0, d: 5 }], 400, 200).holes.length === 0);
+
+/* =========== H. Cutlist 清单式零件表 =========== */
+var cl = Cutlist.build({
+  thickness: 15, fit: 0.2, rows: [
+    { name: 'A', len: 600, wid: 300, qty: 2, grain: 'long' },
+    { name: 'B', len: 400, wid: 200, qty: 1, corners: { all: { type: 'round', size: 10 } }, pockets: [{ ref: 'center', x: 0, y: 0, w: 100, h: 20, depth: 6 }] }
+  ]
+});
+chk('清单出 2 种零件', cl.parts.length === 2 && cl.parts[0].qty === 2, cl.parts.length);
+chk('清单 info 统计', cl.info.totalQty === 3 && cl.info.pocketCount === 1 && cl.info.mode === '零件清单', JSON.stringify(cl.info));
+chk('清单 pocket 深度落地', cl.parts[1].pockets.length === 1 && cl.parts[1].pockets[0].depth === 6);
+chk('清单零件全部合法', errsOf(cl.parts).length === 0, errsOf(cl.parts).slice(0, 3).join(' | '));
+chk('清单尺寸 = 用户填的长x宽', near(cl.parts[0].bbox().w, 600, 1e-9) && near(cl.parts[0].bbox().h, 300, 1e-9),
+  G.round(cl.parts[0].bbox().w, 2) + 'x' + G.round(cl.parts[0].bbox().h, 2));
+chk('pocket 不计入净面积', near(Math.abs(cl.parts[1].area()), 400 * 200 - 4 * (100 - Math.PI * 25), 1e-6), G.round(Math.abs(cl.parts[1].area()), 3));
+chk('pocket 计入切割周长', cl.parts[1].cutLength() > 2 * (400 + 200), G.round(cl.parts[1].cutLength(), 1));
+chk('pocket 深≥板厚 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'X', len: 300, wid: 200, pockets: [{ w: 50, h: 20, depth: 15 }] }] }).warnings.some(function (m) { return m.level === 'error'; }));
+chk('长/宽非正 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'Y', len: 0, wid: 200 }] }).warnings.some(function (m) { return m.level === 'error'; }));
+chk('空清单给引导提示', Cutlist.build({ thickness: 15, rows: [] }).warnings.some(function (m) { return /加一行/.test(m.text); }));
+chk('停用行不出图', Cutlist.build({ thickness: 15, rows: [{ name: 'A', len: 600, wid: 300 }, { name: 'B', len: 600, wid: 300, off: true }] }).parts.length === 1);
+chk('纹理方向写入 meta', cl.parts[0].meta.grain === 'long' && Cutlist.build({ thickness: 15, rows: [{ len: 1, wid: 1 }] }) !== null);
+chk('grain 非法值退化为 any', Cutlist.build({ thickness: 15, rows: [{ name: 'g', len: 300, wid: 200, grain: 'xx' }] }).parts[0].meta.grain === 'any');
+// 边缺口精确面积 + 越界 + 重叠
+var cn = Cutlist.build({ thickness: 15, rows: [{ name: 'N', len: 600, wid: 300, notches: [{ edge: 'bottom', at: 100, len: 50, depth: 20 }, { edge: 'top', at: 100, len: 50, depth: 20 }] }] });
+chk('上下边各一缺口 面积精确', near(Math.abs(cn.parts[0].area()), 600 * 300 - 2 * 50 * 20, 1e-6), G.round(Math.abs(cn.parts[0].area()), 3));
+chk('缺口板合法', errsOf(cn.parts).length === 0, errsOf(cn.parts).join('|'));
+// top 边 at 换算: at 从左起算 -> 缺口应在 x∈[100,150]
+var cnTopXs = cn.parts[0].outer.filter(function (q) { return near(q.y, 280, 1e-6); }).map(function (q) { return G.round(q.x, 3); }).sort(function (a, b) { return a - b; });
+chk('top 边 at 按"从左起算"换算', cnTopXs.length === 2 && near(cnTopXs[0], 100, 1e-6) && near(cnTopXs[1], 150, 1e-6), JSON.stringify(cnTopXs));
+// left 边 at 从下起算
+var cnl = Cutlist.build({ thickness: 15, rows: [{ name: 'NL', len: 600, wid: 300, notches: [{ edge: 'left', at: 40, len: 60, depth: 25 }] }] });
+var cnlYs = cnl.parts[0].outer.filter(function (q) { return near(q.x, 25, 1e-6); }).map(function (q) { return G.round(q.y, 3); }).sort(function (a, b) { return a - b; });
+chk('left 边 at 按"从下起算"换算', cnlYs.length === 2 && near(cnlYs[0], 40, 1e-6) && near(cnlYs[1], 100, 1e-6), JSON.stringify(cnlYs));
+chk('缺口超边界 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'O', len: 600, wid: 300, notches: [{ edge: 'bottom', at: 580, len: 50, depth: 20 }] }] }).warnings.some(function (m) { return m.level === 'error'; }));
+chk('缺口重叠 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'O2', len: 600, wid: 300, notches: [{ edge: 'bottom', at: 100, len: 60, depth: 20 }, { edge: 'bottom', at: 120, len: 60, depth: 20 }] }] }).warnings.some(function (m) { return m.level === 'error'; }));
+chk('缺口几乎切穿 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'O3', len: 600, wid: 300, notches: [{ edge: 'bottom', at: 100, len: 60, depth: 295 }] }] }).warnings.some(function (m) { return m.level === 'error'; }));
+// 边缺口 + 四角冲突
+chk('缺口压到四角 报 error', Cutlist.build({ thickness: 15, rows: [{ name: 'O4', len: 600, wid: 300, corners: { all: { type: 'notch', size: 40 } }, notches: [{ edge: 'bottom', at: 5, len: 60, depth: 20 }] }] }).warnings.some(function (m) { return m.level === 'error'; }));
+// 洞洞板行数据流
+var cpb = Cutlist.build({ thickness: 15, rows: [{ name: 'P', len: 760, wid: 560, pegboard: { dia: 12, pitch: 40, margin: 30 } }] });
+chk('清单洞洞板落地为孔', cpb.parts[0].holes.length > 100, cpb.parts[0].holes.length);
+chk('清单洞洞板写 meta', cpb.parts[0].meta.pegboard && cpb.parts[0].meta.pegboard.count === cpb.parts[0].holes.length, JSON.stringify(cpb.parts[0].meta.pegboard));
+chk('清单洞洞板合法', errsOf(cpb.parts).length === 0, errsOf(cpb.parts).slice(0, 2).join('|'));
+chk('清单洞洞板备注含孔数', /共 \d+ 孔/.test(cpb.parts[0].meta.note), cpb.parts[0].meta.note);
+// 模板
+var tl = Cutlist.templateList();
+chk('模板 >= 5 个', tl.length >= 5, tl.map(function (q) { return q.key; }).join(','));
+tl.forEach(function (tp) {
+  var rr2 = Cutlist.template(tp.key, 15);
+  var b2 = Cutlist.build({ thickness: 15, fit: 0.2, rows: rr2 });
+  var errs2 = errsOf(b2.parts);
+  var hardWarn = b2.warnings.filter(function (m) { return m.level === 'error'; });
+  chk('模板 ' + tp.key + ' 合法可排样',
+    b2.parts.length > 0 && errs2.length === 0 && hardWarn.length === 0 &&
+    Nest.verify(Nest.nest(b2.parts.map(function (p) { return { part: p, qty: p.qty }; }), { w: 2440, h: 1220, margin: 10, gap: 6, respectGrain: true }), { margin: 10, respectGrain: true }).length === 0,
+    b2.parts.length + ' | ' + errs2.slice(0, 2).join('|') + ' | ' + hardWarn.map(function (m) { return m.text; }).slice(0, 2).join('|'));
+});
+chk('未知模板返回 null', Cutlist.template('nope', 15) === null);
+chk('blankRow 可直出图', (function () { var b3 = Cutlist.build({ thickness: 15, rows: [Cutlist.blankRow(1)] }); return b3.parts.length === 1 && errsOf(b3.parts).length === 0; })());
+// notchU 换算单测
+chk('notchU bottom 恒等', Cutlist.notchU('bottom', 100, 50, 600, 300) === 100);
+chk('notchU right 恒等', Cutlist.notchU('right', 100, 50, 600, 300) === 100);
+chk('notchU top 镜像', Cutlist.notchU('top', 100, 50, 600, 300) === 600 - 100 - 50);
+chk('notchU left 镜像', Cutlist.notchU('left', 100, 50, 600, 300) === 300 - 100 - 50);
+
+/* =========== I. 配方库 =========== */
+chk('配方 >= 6 个', Custom.recipeList().length >= 6, Custom.recipeList().map(function (q) { return q.key; }).join(','));
+Custom.recipeList().forEach(function (rc) {
+  chk('配方 ' + rc.key + ' 有表单定义', !!rc.label && rc.fields && rc.fields.length > 0 && rc.fields.every(function (f) { return f.id && f.label && f.type; }),
+    (rc.fields || []).map(function (f) { return f.id; }).join(','));
+  var u = Custom.recipeUnit(rc.key, { thickness: 15, width: 800, depth: 300, height: 800, fit: 0.2 });
+  chk('配方 ' + rc.key + ' 零件合法', u.parts.length >= 3 && errsOf(u.parts).length === 0,
+    u.parts.length + ' | ' + errsOf(u.parts).slice(0, 3).join(' | '));
+  chk('配方 ' + rc.key + ' 可排样+可导出', (function () {
+    var n3 = Nest.nest(u.parts.map(function (p) { return { part: p, qty: p.qty || 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6, respectGrain: true });
+    return Nest.verify(n3, { margin: 10, respectGrain: true }).length === 0 &&
+      CAD.toDXF(u.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0;
+  })());
+  chk('配方 ' + rc.key + ' 有接合', (u.info.tenonJoints || 0) + (u.info.lapJoints || 0) > 0, JSON.stringify(u.info));
+});
+chk('未知配方返回空', (function () { var u = Custom.recipeUnit('nope', { thickness: 15 }); return !u || !u.parts || u.parts.length === 0; })());
+// 参数联动: 层板数变多 -> 零件变多
+var g1 = Custom.recipeUnit('grid', { thickness: 15, width: 900, depth: 320, height: 900, fit: .2, dividers: '300,600', shelvesPerBay: '1,1,1' });
+var g2 = Custom.recipeUnit('grid', { thickness: 15, width: 900, depth: 320, height: 900, fit: .2, dividers: '300,600', shelvesPerBay: '3,3,3' });
+chk('格柜层板数联动', g2.parts.length > g1.parts.length, g1.parts.length + ' -> ' + g2.parts.length);
+var w1 = Custom.recipeUnit('winerack', { thickness: 15, width: 600, depth: 300, height: 400, fit: .2, cols: 1, rows: 1 });
+var w2 = Custom.recipeUnit('winerack', { thickness: 15, width: 600, depth: 300, height: 400, fit: .2, cols: 3, rows: 2 });
+chk('酒格行列联动', w2.parts.length === w1.parts.length + 3, w1.parts.length + ' -> ' + w2.parts.length);
+// L 形转角柜曾因边 profile 未排序而自交, 这是回归点
+var lc = Custom.recipeUnit('corner', { thickness: 15, width: 900, depth: 320, height: 900, fit: .2, legX: 900, legY: 700, shelves: 2 });
+chk('L形转角柜无自交(回归)', errsOf(lc.parts).length === 0, errsOf(lc.parts).slice(0, 3).join('|'));
+// 洞洞板挂墙组: 改孔距孔数要变
+var pw1 = Custom.recipeUnit('pegwall', { thickness: 15, width: 800, depth: 300, height: 600, fit: .2, pegPitch: 30, pegDia: 10, pegMargin: 40 });
+var pw2 = Custom.recipeUnit('pegwall', { thickness: 15, width: 800, depth: 300, height: 600, fit: .2, pegPitch: 60, pegDia: 10, pegMargin: 40 });
+function holeSum(u) { var n = 0; u.parts.forEach(function (p) { n += p.holes.length; }); return n; }
+chk('挂墙组孔距联动', holeSum(pw2) < holeSum(pw1), holeSum(pw1) + ' -> ' + holeSum(pw2));
+
+/* =========== J. 井字互穿: 两块板半槽必须从相反侧切入 =========== */
+// 这是 part.validate() 查不出来的装配语义错误(几何都合法, 但物理上插不进去)
+var wr = Custom.recipeUnit('winerack', { thickness: 15, width: 600, depth: 300, height: 400, fit: 0.2, cols: 1, rows: 1 });
+var wby = {}; wr.parts.forEach(function (p) { wby[p.name] = p; });
+var V = wby['竖隔板1'], HH = wby['横隔板1'];
+chk('酒格出竖/横隔板', !!V && !!HH, Object.keys(wby).join(','));
+if (V && HH) {
+  var vb = V.bbox(), hb = HH.bbox();
+  var wSlot = 15 + 0.2;
+  // 竖隔板 plane YZ: 画布 x = 世界深度 y, 画布 y = 世界 z - v0
+  var vNotchY = V.outer.filter(function (q) { return near(q.x, vb.x1 - 150, 0.01); }).map(function (q) { return G.round(q.y, 4); }).sort(function (a, b) { return a - b; });
+  chk('竖隔板半槽深 = 对方全宽/2', vNotchY.length === 2, JSON.stringify(vNotchY));
+  chk('竖隔板半槽宽 = t+fit', vNotchY.length === 2 && near(vNotchY[1] - vNotchY[0], wSlot, 1e-6), vNotchY.length === 2 ? G.round(vNotchY[1] - vNotchY[0], 4) : 'n/a');
+  chk('竖隔板半槽居中 v=185', vNotchY.length === 2 && near((vNotchY[0] + vNotchY[1]) / 2, 185, 1e-6), vNotchY.length === 2 ? G.round((vNotchY[0] + vNotchY[1]) / 2, 3) : 'n/a');
+  // 横隔板 plane XY: 画布 y = 世界深度 y
+  var hNotchX = HH.outer.filter(function (q) { return near(q.y, hb.y1 - 150, 0.01) || near(q.y, hb.y0 + 150, 0.01); }).map(function (q) { return G.round(q.x, 4); }).sort(function (a, b) { return a - b; });
+  chk('横隔板半槽存在', hNotchX.length === 2, JSON.stringify(hNotchX));
+  chk('横隔板半槽宽 = t+fit', hNotchX.length === 2 && near(hNotchX[1] - hNotchX[0], wSlot, 1e-6), hNotchX.length === 2 ? G.round(hNotchX[1] - hNotchX[0], 4) : 'n/a');
+  chk('横隔板半槽居中 u=285', hNotchX.length === 2 && near((hNotchX[0] + hNotchX[1]) / 2, 285, 1e-6), hNotchX.length === 2 ? G.round((hNotchX[0] + hNotchX[1]) / 2, 3) : 'n/a');
+  // 关键装配断言: 两块板的槽口必须朝相反方向(一个从深度 0 侧切入, 一个从深度 300 侧)
+  var vOpenXs = V.outer.filter(function (q) { return Math.abs(q.y - 185) < 10; }).map(function (q) { return G.round(q.x, 2); });
+  var hOpenYs = HH.outer.filter(function (q) { return Math.abs(q.x - 285) < 10; }).map(function (q) { return G.round(q.y, 2); });
+  var vOpen = Math.max.apply(null, vOpenXs), hOpen = Math.max.apply(null, hOpenYs);
+  chk('半槽开口在相反侧(能真的插进去)', vOpen !== hOpen, '竖开口@深度' + vOpen + ' / 横开口@深度' + hOpen);
+  chk('两半槽深度之和 = 板宽(插到底齐平)', near(150 + 150, 300, 1e-6));
+  chk('搭接被统计', wr.info.lapJoints >= 1, JSON.stringify(wr.info));
+}
+
+/* =========== K. 板位表增删板回归 =========== */
+// 曾经: 新层板贯通整宽 -> 与竖隔板互穿 -> 榫眼与已有对接层板打架 -> 自交
+var ps = Custom.recipePanels('grid', { thickness: 15, width: 900, depth: 320, height: 900, dividers: '300,600', shelvesPerBay: '2,1,3' });
+chk('recipePanels 出板位', ps.length >= 6, ps.length);
+// 编辑器"＋层板/＋竖隔板"的落位策略: 都只跨一格, 走干净的对接
+var ps2 = ps.slice();
+ps2.push({ id: 'S9', name: '层板', plane: 'XY', at: 435, u0: 615, u1: 885, v0: 0, v1: 320, qty: 1, grain: 'long' });
+ps2.push({ id: 'V9', name: '竖隔板', plane: 'YZ', at: 750, u0: 0, u1: 320, v0: 240, v1: 427.5, qty: 1, grain: 'cross' });
+ps2.push({ id: 'K9', name: '背板', plane: 'XZ', at: 312.5, u0: 15, u1: 885, v0: 15, v1: 885, qty: 1, grain: 'long' });
+var rb = Custom.build({ thickness: 15, fit: 0.2, tenonCount: 3, panels: ps2 });
+chk('加层板+竖隔板+背板后全部合法(回归)', errsOf(rb.parts).length === 0, errsOf(rb.parts).slice(0, 4).join(' | '));
+chk('格内落位不产生过约束', !rb.warnings.some(function (m) { return /无法共存/.test(m.text); }),
+  rb.warnings.filter(function (m) { return /无法共存/.test(m.text); }).map(function (m) { return m.text; }).slice(0, 2).join('|'));
+chk('加板后无 error 级警告', !rb.warnings.some(function (m) { return m.level === 'error'; }), rb.warnings.filter(function (m) { return m.level === 'error'; }).map(function (m) { return m.text; }).slice(0, 2).join('|'));
+chk('加板后可排样', Nest.verify(Nest.nest(rb.parts.map(function (p) { return { part: p, qty: p.qty || 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 }), { margin: 10 }).length === 0);
+// 过约束场景(贯通全高竖板 + 背板): 必须降级成可切的合法零件 + 点名放弃了哪几处接合
+var ps3 = ps.slice();
+ps3.push({ id: 'S9', name: '新层板', plane: 'XY', at: 435, u0: 615, u1: 885, v0: 0, v1: 320, qty: 1, grain: 'long' });
+ps3.push({ id: 'V9', name: '贯通竖板', plane: 'YZ', at: 750, u0: 0, u1: 320, v0: 15, v1: 885, qty: 1, grain: 'cross' });
+ps3.push({ id: 'K9', name: '背板', plane: 'XZ', at: 312.5, u0: 15, u1: 885, v0: 15, v1: 885, qty: 1, grain: 'long' });
+var rc2 = Custom.build({ thickness: 15, fit: 0.2, tenonCount: 3, panels: ps3 });
+chk('过约束仍产出合法零件(可切)', errsOf(rc2.parts).length === 0, errsOf(rc2.parts).slice(0, 3).join(' | '));
+chk('过约束报 warn 不是 error(不阻断出图)', !rc2.warnings.some(function (m) { return m.level === 'error'; }) &&
+  rc2.warnings.some(function (m) { return /无法共存/.test(m.text); }),
+  rc2.warnings.filter(function (m) { return m.level === 'error'; }).map(function (m) { return m.text; }).join('|'));
+chk('过约束提示点名了具体接合', (function () {
+  var m = rc2.warnings.filter(function (q) { return /无法共存/.test(q.text); })[0];
+  return !!m && /【/.test(m.text) && /背板|层板|搭接|出榫/.test(m.text);
+})(), (rc2.warnings.filter(function (q) { return /无法共存/.test(q.text); })[0] || {}).text);
+chk('过约束仍可排样可导出', (function () {
+  var n4 = Nest.nest(rc2.parts.map(function (p) { return { part: p, qty: p.qty || 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 });
+  return Nest.verify(n4, { margin: 10 }).length === 0 && CAD.toDXF(rc2.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0;
+})());
+// 悬空板检测
+chk('悬空板被检出', Custom.build({
+  thickness: 15, panels: [
+    { id: 'A', name: 'A', plane: 'XY', at: 7.5, u0: 0, u1: 300, v0: 0, v1: 300 },
+    { id: 'B', name: 'B', plane: 'YZ', at: 2000, u0: 0, u1: 300, v0: 0, v1: 300 }]
+}).warnings.some(function (m) { return /悬空/.test(m.text); }));
+// 同平面压叠
+chk('同平面压叠被检出', Custom.build({
+  thickness: 15, panels: [
+    { id: 'A', name: 'A', plane: 'XY', at: 100, u0: 0, u1: 300, v0: 0, v1: 300 },
+    { id: 'B', name: 'B', plane: 'XY', at: 100, u0: 100, u1: 400, v0: 100, v1: 400 }]
+}).warnings.length > 0);
+chk('空板位表给提示', Custom.build({ thickness: 15, panels: [] }).warnings.length > 0);
+
+/* =========== L. Render.drawPlan 三视图 =========== */
+function mkcv(w, h) {
+  var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  Object.defineProperty(cv, 'clientWidth', { value: w });
+  Object.defineProperty(cv, 'clientHeight', { value: h });
+  return cv;
+}
+var pcv = mkcv(900, 400);
+var planPanels = Custom.recipePanels('grid', { thickness: 15, width: 600, depth: 300, height: 600, dividers: '300', shelvesPerBay: '1,1' });
+var pr = Render.drawPlan(pcv, planPanels, { thickness: 15 });
+chk('drawPlan 返回 3 视图', pr && pr.views.length === 3 && typeof pr.hit === 'function');
+chk('三视图 key 齐全', pr && pr.views.map(function (v) { return v.key; }).sort().join(',').length > 0, pr && pr.views.map(function (v) { return v.key; }).join(','));
+chk('每个视图都画到全部板', pr && pr.views.every(function (v) { return v.rects.length === planPanels.length; }), pr && pr.views.map(function (v) { return v.rects.length; }).join('/') + ' vs ' + planPanels.length);
+chk('drawPlan 命中测试可选中板', (function () {
+  if (!pr) return false;
+  var r0 = pr.views[0].rects[0];
+  var got = pr.hit(r0.x + r0.w / 2, r0.y + r0.h / 2);
+  return !!got && !!got.id;
+})(), (function () { if (!pr) return 'n/a'; var r0 = pr.views[0].rects[0]; var q = pr.hit(r0.x + r0.w / 2, r0.y + r0.h / 2); return q ? q.name : 'null'; })());
+chk('drawPlan 空白处不命中', pr && pr.hit(-50, -50) === null);
+chk('空板位表 drawPlan 返回 null', Render.drawPlan(mkcv(900, 400), [], { thickness: 15 }) === null);
+chk('panelBox 世界包围盒厚度 = t', (function () {
+  var b = Render.panelBox({ plane: 'XY', at: 7.5, u0: 0, u1: 300, v0: 0, v1: 200 }, 15);
+  return b && near(b.z[1] - b.z[0], 15, 1e-9) && near(b.x[1] - b.x[0], 300, 1e-9) && near(b.y[1] - b.y[0], 200, 1e-9);
+})(), JSON.stringify(Render.panelBox({ plane: 'XY', at: 7.5, u0: 0, u1: 300, v0: 0, v1: 200 }, 15)));
+chk('panelBox YZ 平面法向为 x', (function () {
+  var b = Render.panelBox({ plane: 'YZ', at: 7.5, u0: 0, u1: 300, v0: 0, v1: 700 }, 15);
+  return b && near(b.x[1] - b.x[0], 15, 1e-9) && near(b.y[1] - b.y[0], 300, 1e-9) && near(b.z[1] - b.z[0], 700, 1e-9);
+})());
+// 三视图区域必须都有像素(不能有空视图)
+chk('三视图区域都画了东西', (function () {
+  var g2 = pcv.getContext('2d');
+  var im = g2.getImageData(0, 0, pcv.width, pcv.height).data;
+  return pr.views.every(function (v) {
+    var n = 0;
+    v.rects.forEach(function (r) {
+      var cx = Math.round(r.x + r.w / 2), cy = Math.round(r.y + r.h / 2);
+      if (cx < 0 || cy < 0 || cx >= pcv.width || cy >= pcv.height) return;
+      var i = (cy * pcv.width + cx) * 4;
+      if (im[i + 3] > 0) n++;
+    });
+    return n === v.rects.length;
+  });
+})());
+// 选中板呈橙色描边
+chk('选中板高亮为橙色', (function () {
+  var cv2 = mkcv(900, 400);
+  var selId = planPanels[0].id;
+  var pr2 = Render.drawPlan(cv2, planPanels, { thickness: 15, selected: selId });
+  var g3 = cv2.getContext('2d');
+  var im2 = g3.getImageData(0, 0, cv2.width, cv2.height).data;
+  var orange = 0;
+  for (var i = 0; i < im2.length; i += 4) {
+    if (im2[i + 3] > 60 && im2[i] > 180 && im2[i + 1] > 100 && im2[i + 1] < 210 && im2[i + 2] < 120) orange++;
+  }
+  return orange > 20;
+})());
+
+/* =========== N. 世界尺寸盒互转（板位表"人话"坐标的地基） ===========
+ * 板位表对外只暴露 6 个数: 位置(左起X/前起Y/离地Z) + 尺寸(宽W/深D/高H)。
+ * 内部仍是 {plane,at,u0,u1,v0,v1}。这层互转错了, 用户填的每个数都会跑偏,
+ * 所以必须逐 plane 验证**往返恒等**。 */
+var BT = 18;
+['XY', 'YZ', 'XZ'].forEach(function (pl) {
+  var ax = Custom.thickAxis(pl);
+  chk('thickAxis(' + pl + ')=' + ax, ax === { XY: 'z', YZ: 'x', XZ: 'y' }[pl], ax);
+
+  // 造一块该朝向的板, 读盒 -> 写回 -> 再读盒, 必须完全一样
+  var p0 = { id: 'bx', name: 'bx', plane: pl, at: 123, u0: 40, u1: 340, v0: 60, v1: 560 };
+  var b1 = Custom.panelBox(p0, BT);
+  chk('panelBox(' + pl + ') 六个数都是有限值', b1 && ['x', 'y', 'z', 'w', 'd', 'h'].every(function (k) {
+    return isFinite(b1[k]);
+  }), JSON.stringify(b1));
+  // 厚度轴上的边长恒 = 板厚
+  var tk = { x: 'w', y: 'd', z: 'h' }[ax];
+  chk('panelBox(' + pl + ') 厚度轴边长=板厚', near(b1[tk], BT, 1e-9), b1[tk]);
+  // 另两个轴的边长 = u/v 跨度
+  var others = ['w', 'd', 'h'].filter(function (k) { return k !== tk; }).map(function (k) { return b1[k]; }).sort(function (a, b) { return a - b; });
+  chk('panelBox(' + pl + ') 另两轴=u/v 跨度', near(others[0], 300, 1e-9) && near(others[1], 500, 1e-9), others.join('/'));
+
+  // 往返恒等
+  var p1 = { id: 'bx', name: 'bx', plane: pl, at: 0, u0: 0, u1: 0, v0: 0, v1: 0 };
+  Custom.setPanelBox(p1, b1, BT);
+  chk('setPanelBox(' + pl + ') 往返恒等 at', near(p1.at, p0.at, 1e-9), p1.at + ' vs ' + p0.at);
+  chk('setPanelBox(' + pl + ') 往返恒等 u/v', near(p1.u0, p0.u0, 1e-9) && near(p1.u1, p0.u1, 1e-9) &&
+    near(p1.v0, p0.v0, 1e-9) && near(p1.v1, p0.v1, 1e-9),
+    [p1.u0, p1.u1, p1.v0, p1.v1].join(','));
+  var b2 = Custom.panelBox(p1, BT);
+  chk('panelBox(' + pl + ') 二次读盒一致', ['x', 'y', 'z', 'w', 'd', 'h'].every(function (k) {
+    return near(b1[k], b2[k], 1e-9);
+  }), JSON.stringify(b2));
+
+  // isThickField: 恰有一个尺寸字段被锁
+  var locked = ['w', 'd', 'h'].filter(function (f) { return Custom.isThickField(f, pl); });
+  chk('isThickField(' + pl + ') 恰锁 1 个尺寸列', locked.length === 1 && locked[0] === tk, locked.join(','));
+  chk('isThickField(' + pl + ') 位置列都不锁', ['x', 'y', 'z'].every(function (f) {
+    return !Custom.isThickField(f, pl);
+  }));
+});
+
+/* setPanelBox 的负数/反序输入要被规整成正长度, 不能生成 u1<u0 的板 */
+(function () {
+  var p = { plane: 'XY', at: 0, u0: 0, u1: 0, v0: 0, v1: 0 };
+  Custom.setPanelBox(p, { x: 100, y: 50, z: 200, w: -300, d: -400, h: 18 }, 18);
+  chk('setPanelBox 负边长被夹成 0(不产生反向板)', p.u1 >= p.u0 && p.v1 >= p.v0,
+    'u ' + p.u0 + '->' + p.u1 + '  v ' + p.v0 + '->' + p.v1);
+})();
+
+/* setPanelPlane: 换朝向时世界盒中心必须不动(否则用户改一下"朝向"板就瞬移) */
+[['XY', 'YZ'], ['XY', 'XZ'], ['YZ', 'XZ'], ['YZ', 'XY'], ['XZ', 'XY'], ['XZ', 'YZ']].forEach(function (pr) {
+  var p = { id: 's', name: 's', plane: pr[0], at: 200, u0: 30, u1: 330, v0: 10, v1: 410 };
+  var before = Custom.panelBox(p, BT);
+  var cenB = { x: before.x + before.w / 2, y: before.y + before.d / 2, z: before.z + before.h / 2 };
+  Custom.setPanelPlane(p, pr[1], BT);
+  chk('setPanelPlane ' + pr[0] + '->' + pr[1] + ' 真的改了 plane', p.plane === pr[1], p.plane);
+  var after = Custom.panelBox(p, BT);
+  var cenA = { x: after.x + after.w / 2, y: after.y + after.d / 2, z: after.z + after.h / 2 };
+  chk('setPanelPlane ' + pr[0] + '->' + pr[1] + ' 世界盒中心不变',
+    near(cenA.x, cenB.x, 1e-6) && near(cenA.y, cenB.y, 1e-6) && near(cenA.z, cenB.z, 1e-6),
+    JSON.stringify(cenB) + ' -> ' + JSON.stringify(cenA));
+  var tkA = { x: 'w', y: 'd', z: 'h' }[Custom.thickAxis(pr[1])];
+  chk('setPanelPlane ' + pr[0] + '->' + pr[1] + ' 新厚度轴=板厚', near(after[tkA], BT, 1e-9), after[tkA]);
+});
+
+/* setPanelPlane 幂等: 换成自己不应改变任何东西 */
+(function () {
+  var p = { plane: 'YZ', at: 9, u0: 1, u1: 301, v0: 2, v1: 402 };
+  var b = Custom.panelBox(p, BT);
+  Custom.setPanelPlane(p, 'YZ', BT);
+  var b2 = Custom.panelBox(p, BT);
+  chk('setPanelPlane 换成自己=幂等', ['x', 'y', 'z', 'w', 'd', 'h'].every(function (k) { return near(b[k], b2[k], 1e-9); }),
+    JSON.stringify(b) + ' -> ' + JSON.stringify(b2));
+  Custom.setPanelPlane(p, 'ZZ', BT);   // 非法朝向应被忽略
+  chk('setPanelPlane 非法朝向被忽略', p.plane === 'YZ', p.plane);
+})();
+
+/* BOX_FIELDS 元信息自洽: 3 位置 + 3 尺寸, id 唯一, 都有中文标签 */
+(function () {
+  var F = Custom.BOX_FIELDS;
+  chk('BOX_FIELDS 6 项', F.length === 6, F.length);
+  chk('BOX_FIELDS 3 位置 3 尺寸',
+    F.filter(function (f) { return f.group === 'pos'; }).length === 3 &&
+    F.filter(function (f) { return f.group === 'size'; }).length === 3);
+  var ids = F.map(function (f) { return f.id; });
+  chk('BOX_FIELDS id = x,y,z,w,d,h', ids.join(',') === 'x,y,z,w,d,h', ids.join(','));
+  chk('BOX_FIELDS 都有 label+hint', F.every(function (f) { return f.label && f.hint; }));
+})();
+
+/* 端到端: 用"六个数"描述一个箱体, 必须能切出合法零件。
+ * 这是板位表新 UI 的真实路径 —— UI 只会调 setPanelBox。 */
+(function () {
+  var T = 15, W = 600, D = 300, H = 700;
+  var defs = [
+    { id: 'L', name: '左侧板', plane: 'YZ', box: { x: 0, y: 0, z: 0, w: T, d: D, h: H } },
+    { id: 'R', name: '右侧板', plane: 'YZ', box: { x: W - T, y: 0, z: 0, w: T, d: D, h: H } },
+    { id: 'B', name: '底板', plane: 'XY', box: { x: T, y: 0, z: 0, w: W - 2 * T, d: D, h: T } },
+    { id: 'T', name: '顶板', plane: 'XY', box: { x: T, y: 0, z: H - T, w: W - 2 * T, d: D, h: T } },
+    { id: 'S', name: '层板', plane: 'XY', box: { x: T, y: 0, z: 350, w: W - 2 * T, d: D, h: T } }
+  ];
+  var panels = defs.map(function (o) {
+    var p = { id: o.id, name: o.name, plane: o.plane, at: 0, u0: 0, u1: 0, v0: 0, v1: 0 };
+    Custom.setPanelBox(p, o.box, T);
+    return p;
+  });
+  // 盒子读回来必须和填进去的一样(位置列不因朝向而错位)
+  var boxOk = defs.every(function (o, i) {
+    var b = Custom.panelBox(panels[i], T);
+    return ['x', 'y', 'z', 'w', 'd', 'h'].every(function (k) { return near(b[k], o.box[k], 1e-9); });
+  });
+  chk('六数建模: 盒子读回一致', boxOk);
+  var r = Custom.build({ thickness: T, fit: 0.2, tenonCount: 3, panels: panels });
+  chk('六数建模: 出 5 件', r.parts.length === 5, r.parts.length);
+  chk('六数建模: 无 error 级零件问题', errsOf(r.parts).length === 0, errsOf(r.parts).join(' | '));
+  var errW = (r.warnings || []).filter(function (m) { return m.level === 'error'; });
+  chk('六数建模: 求解器无 error', errW.length === 0, errW.map(function (m) { return m.text; }).join(' | '));
+  // 每件都必须真的被开了槽/榫(说明相交解算成功, 不是一堆孤立矩形)
+  var joined = r.parts.filter(function (p) { return p.outer.length > 4 || p.holes.length > 0; }).length;
+  chk('六数建模: 至少 4 件带接合特征', joined >= 4, joined);
+})();
+
+/* =========== S. \u5438\u9644\u5f15\u64ce snapLinesFor / snapAxis / movePanel =========== */
+(function () {
+  var T = 15;
+  function P(id, name, plane, box) {
+    var p = { id: id, name: name, plane: plane, at: 0, u0: 0, u1: 0, v0: 0, v1: 0 };
+    Custom.setPanelBox(p, box, T);
+    return p;
+  }
+  /* \u4e00\u4e2a 600x300x720 \u7684\u67dc\u4f53: \u5de6/\u53f3\u4fa7\u677f + \u5e95/\u9876\u677f */
+  var L = P('L', '\u5de6\u4fa7\u677f', 'YZ', { x: 0, y: 0, z: 0, w: T, d: 300, h: 720 });
+  var R = P('R', '\u53f3\u4fa7\u677f', 'YZ', { x: 585, y: 0, z: 0, w: T, d: 300, h: 720 });
+  var B = P('B', '\u5e95\u677f', 'XY', { x: T, y: 0, z: 0, w: 570, d: 300, h: T });
+  var TP = P('T', '\u9876\u677f', 'XY', { x: T, y: 0, z: 705, w: 570, d: 300, h: T });
+  var S = P('S', '\u5c42\u677f', 'XY', { x: T, y: 0, z: 350, w: 570, d: 300, h: T });
+  var all = [L, R, B, TP, S];
+
+  var lines = Custom.snapLinesFor(all, S, 'z', T);
+  var kinds = {};
+  lines.forEach(function (q) { kinds[q.kind] = (kinds[q.kind] || 0) + 1; });
+  chk('snapLines: \u56db\u7c7b\u5019\u9009\u7ebf\u90fd\u6709', kinds.edge > 0 && kinds.center > 0 && kinds.bounds > 0 && kinds.origin === 1, JSON.stringify(kinds));
+  chk('snapLines: \u4e0d\u5305\u542b\u81ea\u5df1', lines.every(function (q) { return (q.label || '').indexOf('\u5c42\u677f') < 0; }));
+  var vs = lines.map(function (q) { return q.kind + '@' + G.round(q.v, 2); });
+  chk('snapLines: \u540c\u7c7b\u540c\u4f4d\u7f6e\u5df2\u53bb\u91cd', vs.length === vs.filter(function (v, i) { return vs.indexOf(v) === i; }).length, vs.length);
+  var zTop = lines.filter(function (q) { return q.kind === 'edge' && near(q.v, 705, 1e-9); });
+  chk('snapLines: \u9876\u677f\u4e0b\u8868\u9762 z=705 \u5728\u5019\u9009\u91cc', zTop.length === 1);
+  chk('snapLines: bounds \u4e24\u7aef = 0 / 720',
+    lines.some(function (q) { return q.kind === 'bounds' && near(q.v, 0, 1e-9); }) &&
+    lines.some(function (q) { return q.kind === 'bounds' && near(q.v, 720, 1e-9); }));
+  chk('snapLines: \u672a\u77e5\u8f74\u8fd4\u56de\u7a7a', Custom.snapLinesFor(all, S, 'q', T).length === 0);
+
+  /* \u4e09\u4e2a\u628a\u624b\u5404\u81ea\u80fd\u5438\u9644 */
+  var a1 = Custom.snapAxis(all, S, 'z', 703, T, 6);        // \u8fd1\u7aef -> 705(\u9876\u677f\u4e0b\u8868\u9762)
+  chk('snapAxis: \u8fd1\u7aef\u5438\u9644', a1.snapped && near(a1.v, 705, 1e-9) && a1.via === 'lo', JSON.stringify(a1));
+  var a2 = Custom.snapAxis(all, S, 'z', 688, T, 6);        // \u8fdc\u7aef(688+15=703) -> 705 => v=690
+  chk('snapAxis: \u8fdc\u7aef\u5438\u9644', a2.snapped && near(a2.v, 690, 1e-9) && a2.via === 'hi', JSON.stringify(a2));
+  var a3 = Custom.snapAxis(all, S, 'z', 355, T, 6);        // \u4e2d\u7ebf(362.5) -> 360(\u6574\u4f53\u4e2d\u7ebf) => v=352.5
+  chk('snapAxis: \u4e2d\u7ebf\u5438\u9644 (\u6574\u4f53\u4e2d\u7ebf 360)', a3.snapped && near(a3.v, 352.5, 1e-9) && a3.via === 'mid', JSON.stringify(a3));
+  chk('snapAxis: label \u53ef\u8bfb', /\u8d34/.test(a1.label || ''), a1.label);
+
+  /* \u5bb9\u5dee\u8fb9\u754c */
+  chk('snapAxis: tol \u5185\u5438\u9644', Custom.snapAxis(all, S, 'z', 705 - 5.9, T, 6).snapped);
+  chk('snapAxis: tol \u5916\u4e0d\u5438\u9644', !Custom.snapAxis(all, S, 'z', 705 - 40, T, 6).snapped);
+  var noSnap = Custom.snapAxis(all, S, 'z', 400, T, 0.001);
+  chk('snapAxis: \u4e0d\u5438\u9644\u65f6\u539f\u503c\u8fd4\u56de', !noSnap.snapped && near(noSnap.v, 400, 1e-9));
+
+  /* \u4f18\u5148\u7ea7: edge \u4f18\u4e8e center (\u540c\u8ddd\u79bb\u65f6) */
+  var pr = (function () {
+    var X = P('X', '\u53c2\u8003A', 'XY', { x: 0, y: 0, z: 100, w: 100, d: 100, h: 20 });   // edge 100/120, center 110
+    var Y = P('Y', '\u53c2\u8003B', 'XY', { x: 0, y: 0, z: 90, w: 100, d: 100, h: 40 });   // center 110, edge 90/130
+    var M = P('M', '\u52a8\u677f', 'XY', { x: 0, y: 0, z: 0, w: 100, d: 100, h: T });
+    return Custom.snapAxis([X, Y, M], M, 'z', 110, T, 6);
+  })();
+  chk('snapAxis: \u540c\u8ddd\u65f6 edge \u4f18\u4e8e center', pr.snapped && pr.kind === 'edge', pr.kind + ' v=' + pr.v);
+
+  /* movePanel: \u53ea\u6539\u4f4d\u7f6e\u4e0d\u6539\u5c3a\u5bf8 */
+  var M2 = P('M2', '\u65b0\u5c42\u677f', 'XY', { x: 20, y: 0, z: 200, w: 300, d: 300, h: T });
+  var pool = all.concat([M2]);
+  var b0 = Custom.panelBox(M2, T);
+  var mv = Custom.movePanel(pool, M2, { x: 16.4, z: 401.2 }, ['x', 'z'], T, { tol: 6 });
+  var b1 = Custom.panelBox(M2, T);
+  chk('movePanel: \u5c3a\u5bf8\u4e0d\u53d8', near(b1.w, b0.w, 1e-9) && near(b1.d, b0.d, 1e-9) && near(b1.h, b0.h, 1e-9));
+  chk('movePanel: x \u5438\u9644\u5230 15 (\u5de6\u4fa7\u677f\u5185\u8868\u9762)', near(b1.x, 15, 1e-9), b1.x);
+  chk('movePanel: \u8fd4\u56de\u5438\u9644\u62a5\u544a', mv.snaps.length >= 1 && mv.snaps[0].axis === 'x', JSON.stringify(mv.snaps));
+  chk('movePanel: y \u672a\u5217\u5165 axes \u5219\u4e0d\u52a8', near(b1.y, b0.y, 1e-9));
+  /* \u5173\u95ed\u5438\u9644 */
+  Custom.movePanel(pool, M2, { x: 16.4, z: 401.2 }, ['x', 'z'], T, { snap: false });
+  chk('movePanel: snap=false \u4e0d\u5438\u9644', near(Custom.panelBox(M2, T).x, 16.4, 1e-9));
+
+  /* \u5438\u9644\u7684\u771f\u6b63\u610f\u4e49: \u5438\u9644\u524d\u6c42\u89e3\u5668\u5224\u4e0d\u76f8\u4ea4, \u5438\u9644\u540e\u624d\u76f8\u4ea4 */
+  var Gap = P('Gap', '\u6d6e\u7a7a\u5c42\u677f', 'XY', { x: 15.7, y: 0, z: 300, w: 570, d: 300, h: T });
+  chk('\u5438\u9644\u524d: \u5dee 0.7mm \u4e0e\u4fa7\u677f\u4e0d\u76f8\u4ea4', Custom.intersect(Gap, L, T) === null);
+  Custom.movePanel([L, R, B, TP, Gap], Gap, { x: 15.7 }, ['x'], T, { tol: 6 });
+  chk('\u5438\u9644\u540e: \u4e24\u4fa7\u677f\u90fd\u76f8\u4ea4(\u699f\u536f\u624d\u80fd\u751f\u6210)',
+    !!Custom.intersect(Gap, L, T) && !!Custom.intersect(Gap, R, T), JSON.stringify(Custom.panelBox(Gap, T)));
+  chk('\u5438\u9644\u540e: \u843d\u5728 x=15', near(Custom.panelBox(Gap, T).x, 15, 1e-9));
+  /* \u5c3a\u5bf8\u504f\u5c0f 1mm \u7684\u677f\u672c\u8d28\u4e0a\u4e0d\u53ef\u80fd\u4e24\u8fb9\u90fd\u8d34, \u5438\u9644\u53ea\u4fdd\u8bc1"\u81f3\u5c11\u8d34\u4f4f\u4e00\u4fa7"\u4e14\u4e0d\u60ac\u7a7a */
+  var Nar = P('Nar', '\u7a0d\u77ed\u5c42\u677f', 'XY', { x: 15.7, y: 0, z: 420, w: 569, d: 300, h: T });
+  Custom.movePanel([L, R, B, TP, Nar], Nar, { x: 15.7 }, ['x'], T, { tol: 6 });
+  var nb = Custom.panelBox(Nar, T);
+  chk('\u5438\u9644: \u7a0d\u77ed\u677f\u81f3\u5c11\u8d34\u4f4f\u4e00\u4fa7',
+    near(nb.x, 15, 1e-9) || near(nb.x + nb.w, 585, 1e-9), JSON.stringify(nb));
+  chk('\u5438\u9644: \u7a0d\u77ed\u677f\u4ecd\u4e0e\u67d0\u4fa7\u677f\u76f8\u4ea4',
+    !!Custom.intersect(Nar, L, T) || !!Custom.intersect(Nar, R, T));
+})();
+
+/* =========== V. \u5bf9\u9f50 / \u7b49\u95f4\u8ddd =========== */
+(function () {
+  var T = 15;
+  function P(id, box, plane) {
+    var p = { id: id, name: id, plane: plane || 'XY', at: 0, u0: 0, u1: 0, v0: 0, v1: 0 };
+    Custom.setPanelBox(p, box, T);
+    return p;
+  }
+  function zOf(p) { return Custom.panelBox(p, T).z; }
+  function xOf(p) { return Custom.panelBox(p, T).x; }
+
+  var A = P('A', { x: 10, y: 0, z: 0, w: 200, d: 300, h: T });
+  var B = P('B', { x: 50, y: 0, z: 300, w: 100, d: 300, h: T });
+  var C2 = P('C', { x: 80, y: 0, z: 600, w: 300, d: 300, h: T });
+  var ps = [A, B, C2];
+
+  chk('align: \u672a\u77e5\u6a21\u5f0f\u62a5\u9519', !!Custom.alignPanels(ps, ['A', 'B'], 'nope', T).error);
+  chk('align: \u5355\u9009\u62a5\u9519', !!Custom.alignPanels(ps, ['A'], 'xmin', T).error);
+
+  var r1 = Custom.alignPanels(ps, ['A', 'B', 'C'], 'xmin', T);
+  chk('align xmin: \u4e09\u5757\u5de6\u8fb9\u90fd = 10', near(xOf(A), 10, 1e-9) && near(xOf(B), 10, 1e-9) && near(xOf(C2), 10, 1e-9), [xOf(A), xOf(B), xOf(C2)].join('/'));
+  chk('align xmin: \u62a5\u544a\u79fb\u52a8 2 \u5757', r1.moved.length === 2, JSON.stringify(r1.moved.map(function (m) { return m.id; })));
+  chk('align xmin: \u5c3a\u5bf8\u672a\u53d8', near(Custom.panelBox(B, T).w, 100, 1e-9) && near(Custom.panelBox(C2, T).w, 300, 1e-9));
+  chk('align: \u5df2\u9f50\u65f6 moved \u4e3a\u7a7a', Custom.alignPanels(ps, ['A', 'B', 'C'], 'xmin', T).moved.length === 0);
+
+  var r2 = Custom.alignPanels(ps, ['A', 'B', 'C'], 'xmax', T);
+  chk('align xmax: \u53f3\u8fb9\u90fd = 310', [A, B, C2].every(function (p) { var b = Custom.panelBox(p, T); return near(b.x + b.w, 310, 1e-9); }), r2.target);
+
+  Custom.alignPanels(ps, ['A', 'B', 'C'], 'xmid', T);
+  chk('align xmid: \u4e2d\u7ebf\u90fd\u76f8\u7b49', [A, B, C2].every(function (p) { var b = Custom.panelBox(p, T); return near(b.x + b.w / 2, 160, 1e-9); }));
+
+  /* \u7b49\u95f4\u8ddd: \u51c0\u7a7a\u76f8\u7b49 */
+  /* 注: XY 板的 h 就是板厚(setPanelBox 会把厚度轴压回 t), 所以四块都是 T 高;
+   * 想验"长度不同也能等间距", 得拿非厚度轴(下面另有 x 轴的例子)。 */
+  var S1 = P('S1', { x: 0, y: 0, z: 0, w: 200, d: 300, h: T });
+  var S2 = P('S2', { x: 0, y: 0, z: 137, w: 200, d: 300, h: T });
+  var S3 = P('S3', { x: 0, y: 0, z: 411, w: 200, d: 300, h: T });
+  var S4 = P('S4', { x: 0, y: 0, z: 700, w: 200, d: 300, h: T });
+  var sp = [S1, S2, S3, S4];
+  chk('distribute: \u4e24\u5757\u62a5\u9519', !!Custom.distributePanels(sp, ['S1', 'S4'], 'z', T).error);
+  chk('distribute: \u672a\u77e5\u8f74\u62a5\u9519', !!Custom.distributePanels(sp, ['S1', 'S2', 'S4'], 'q', T).error);
+  var d1 = Custom.distributePanels(sp, ['S1', 'S2', 'S3', 'S4'], 'z', T, { mode: 'gap' });
+  var gaps = [];
+  var sorted = sp.slice().sort(function (a, b) { return zOf(a) - zOf(b); });
+  for (var i = 0; i < sorted.length - 1; i++) {
+    var bi = Custom.panelBox(sorted[i], T), bj = Custom.panelBox(sorted[i + 1], T);
+    gaps.push(bj.z - (bi.z + bi.h));
+  }
+  chk('distribute gap: \u76f8\u90bb\u51c0\u7a7a\u5b8c\u5168\u76f8\u7b49',
+    gaps.every(function (g) { return near(g, gaps[0], 1e-9); }), gaps.map(function (g) { return G.round(g, 4); }).join('/'));
+  chk('distribute gap: \u51c0\u7a7a = (715-4T)/3', near(gaps[0], (700 + T - 4 * T) / 3, 1e-9), gaps[0]);
+  chk('distribute gap: \u9996\u672b\u4e0d\u52a8', near(zOf(S1), 0, 1e-9) && near(zOf(S4), 700, 1e-9));
+  chk('distribute gap: \u62a5\u544a gap \u4e0e\u5b9e\u6d4b\u4e00\u81f4', near(d1.gap, gaps[0], 1e-9));
+  chk('distribute gap: \u5c3a\u5bf8\u672a\u53d8', [S1, S2, S3, S4].every(function (p) { var b = Custom.panelBox(p, T); return near(b.w, 200, 1e-9) && near(b.d, 300, 1e-9) && near(b.h, T, 1e-9); }));
+  /* \u957f\u5ea6\u4e0d\u4e00\u81f4\u7684\u7b49\u95f4\u8ddd: \u6cbf x \u8f74\u6392\u56db\u5757\u5bbd\u5ea6\u5404\u5f02\u7684\u7ad6\u677f */
+  (function () {
+    /* \u6ce8: YZ \u677f\u7684\u539a\u5ea6\u8f74\u662f x, w \u4f1a\u88ab\u538b\u6210 T; \u8981\u9a8c"\u957f\u5ea6\u5404\u5f02"\u5fc5\u987b\u7528 XY \u677f\u6cbf x \u6392 */
+    var H1 = P('H1', { x: 0, y: 0, z: 0, w: 40, d: 300, h: T });
+    var H2 = P('H2', { x: 100, y: 0, z: 0, w: 90, d: 300, h: T });
+    var H3 = P('H3', { x: 300, y: 0, z: 0, w: 20, d: 300, h: T });
+    var H4 = P('H4', { x: 460, y: 0, z: 0, w: 40, d: 300, h: T });
+    var hs4 = [H1, H2, H3, H4];
+    Custom.distributePanels(hs4, ['H1', 'H2', 'H3', 'H4'], 'x', T, { mode: 'gap' });
+    var sortedV = hs4.slice().sort(function (a, b) { return Custom.panelBox(a, T).x - Custom.panelBox(b, T).x; });
+    var vg = [];
+    for (var i = 0; i < 3; i++) {
+      var bi = Custom.panelBox(sortedV[i], T), bj = Custom.panelBox(sortedV[i + 1], T);
+      vg.push(bj.x - (bi.x + bi.w));
+    }
+    chk('distribute gap: \u5bbd\u5ea6\u5404\u5f02\u4e5f\u80fd\u7b49\u51c0\u7a7a', vg.every(function (g) { return near(g, vg[0], 1e-9); }), vg.map(function (g) { return G.round(g, 4); }).join('/'));
+    chk('distribute gap: \u51c0\u7a7a = (500-190)/3', near(vg[0], (500 - 190) / 3, 1e-9), vg[0]);
+    chk('distribute gap: \u5bbd\u5ea6\u4e0d\u53d8', [40, 90, 20, 40].every(function (w, i) { return near(Custom.panelBox(hs4[i], T).w, w, 1e-9); }));
+  })();
+
+  var d2 = Custom.distributePanels(sp, ['S1', 'S2', 'S3', 'S4'], 'z', T, { mode: 'center' });
+  var cs = sp.slice().sort(function (a, b) { return zOf(a) - zOf(b); }).map(function (p) { var b = Custom.panelBox(p, T); return b.z + b.h / 2; });
+  var cg = [];
+  for (var j = 0; j < cs.length - 1; j++) cg.push(cs[j + 1] - cs[j]);
+  chk('distribute center: \u4e2d\u7ebf\u7b49\u8ddd', cg.every(function (g) { return near(g, cg[0], 1e-9); }), cg.map(function (g) { return G.round(g, 4); }).join('/'));
+  chk('distribute center: \u62a5\u544a gap \u4e00\u81f4', near(d2.gap, cg[0], 1e-9));
+
+  /* \u9009\u96c6\u5305\u56f4\u76d2 */
+  var se = Custom.selectionExtent(sp, ['S1', 'S4'], T);
+  chk('selectionExtent: count/\u8df3\u5ea6', se.count === 2 && near(se.ext.z[0], 0, 1e-9) && near(se.ext.z[1], 700 + T, 1e-9), JSON.stringify(se.ext.z));
+  chk('selectionExtent: \u7a7a\u9009\u8fd4\u56de null', Custom.selectionExtent(sp, [], T) === null);
+
+  /* \u5bf9\u9f50\u540e\u4ecd\u80fd\u751f\u6210\u5408\u6cd5\u96f6\u4ef6: \u628a\u4e00\u6392\u5c42\u677f\u7b49\u95f4\u8ddd\u540e\u8ddf\u4fa7\u677f\u4ecd\u76f8\u4ea4 */
+  var Lp = P('L', { x: 0, y: 0, z: 0, w: T, d: 300, h: 720 }, 'YZ');
+  var Rp = P('R', { x: 585, y: 0, z: 0, w: T, d: 300, h: 720 }, 'YZ');
+  var Bp = P('B', { x: T, y: 0, z: 0, w: 570, d: 300, h: T });
+  var Tp = P('T', { x: T, y: 0, z: 705, w: 570, d: 300, h: T });
+  var Sa = P('Sa', { x: T, y: 0, z: 213, w: 570, d: 300, h: T });
+  var Sb = P('Sb', { x: T, y: 0, z: 461, w: 570, d: 300, h: T });
+  var box6 = [Lp, Rp, Bp, Tp, Sa, Sb];
+  var dr = Custom.distributePanels(box6, ['B', 'Sa', 'Sb', 'T'], 'z', T, { mode: 'gap' });
+  chk('\u7b49\u95f4\u8ddd\u540e: \u5c42\u677f\u4ecd\u4e0e\u4fa7\u677f\u76f8\u4ea4', !!Custom.intersect(Sa, Lp, T) && !!Custom.intersect(Sb, Rp, T));
+  var rb = Custom.build({ thickness: T, fit: 0.2, tenonCount: 3, panels: box6 });
+  chk('\u7b49\u95f4\u8ddd\u540e: 6 \u4e2a\u96f6\u4ef6\u65e0 error', rb.parts.length === 6 && errsOf(rb.parts).length === 0, errsOf(rb.parts).join(' | '));
+  var layerGap = (function () {
+    var zs = ['B', 'Sa', 'Sb', 'T'].map(function (id) {
+      var p = box6.filter(function (q) { return q.id === id; })[0];
+      var b = Custom.panelBox(p, T);
+      return [b.z, b.z + b.h];
+    }).sort(function (a, b) { return a[0] - b[0]; });
+    var out = [];
+    for (var i = 0; i < zs.length - 1; i++) out.push(zs[i + 1][0] - zs[i][1]);
+    return out;
+  })();
+  chk('\u7b49\u95f4\u8ddd\u540e: \u56db\u5c42\u51c0\u5c42\u9ad8\u5b8c\u5168\u4e00\u81f4',
+    layerGap.every(function (g) { return near(g, layerGap[0], 1e-9); }), layerGap.map(function (g) { return G.round(g, 4); }).join('/'));
+  chk('\u7b49\u95f4\u8ddd\u540e: \u51c0\u5c42\u9ad8 = (720-60)/3', near(layerGap[0], (720 - 4 * T) / 3, 1e-9), layerGap[0]);
+})();
+
+/* ============================================================
+ * 12) 自定义模式的接合方式: 11 种样式 x 6 配方 x 6 板厚 全参数扫描
+ *
+ * 【为什么必须扫全空间】第 9 轮之前 custom.js 里硬编码 style:'finger',
+ * UI 上的"接合方式"下拉框对配方/板位表**完全无效**。接上之后又暴露出
+ * 第二个缺陷: styleExtras 拿到的是"整条边"的 frame 与 L, 于是嵌槽/饼干槽
+ * 沿整块板铺满, 而不是只在两板真正相交的那一段。
+ * 在 grid 这种正交矩阵里重叠区恰好就是整条边 —— 单点测试永远发现不了;
+ * 只有 L 形转角柜(转角公用立板同时当两个臂的母件)才暴露。
+ * 所以这里必须逐组合校验零件合法性, 不能只测一个 happy path。
+ * ============================================================ */
+(function () {
+  var recipes = Object.keys(Custom.RECIPES);
+  var THS = [9, 12, 15, 18, 21, 25];
+  var bad = [], combos = 0;
+  J.STYLES.forEach(function (st) {
+    THS.forEach(function (t) {
+      recipes.forEach(function (rk) {
+        combos++;
+        var r;
+        try {
+          r = Custom.recipeUnit(rk, {
+            thickness: t, width: 800, depth: 320, height: 900, fit: 0.2,
+            jointStyle: st.key, lapStyle: 'plain', tenonCount: 3
+          });
+        } catch (e) {
+          bad.push(st.key + '/t' + t + '/' + rk + ' THROW ' + e.message);
+          return;
+        }
+        var gerr = (r.warnings || []).filter(function (m) { return m.level === 'error'; });
+        var pe = [];
+        r.parts.forEach(function (pt) {
+          pt.validate().forEach(function (m) {
+            if (m.level === 'error') pe.push(m.text);
+          });
+        });
+        if (pe.length || gerr.length) {
+          bad.push(st.key + '/t' + t + '/' + rk + ': ' +
+            (pe[0] || gerr[0].text).slice(0, 70));
+        }
+      });
+    });
+  });
+  chk('全参数扫描: ' + combos + ' 组合零件全部合法', bad.length === 0,
+    bad.length ? (bad.length + ' 组失败, 例: ' + bad.slice(0, 3).join(' | ')) : combos);
+
+  /* 样式必须真的**生效**, 而不是"没报错就算过"。
+   * dowel/biscuit/tongue 的外轮廓与直榫几乎一样, 真正实现接合的全是孔/槽 ——
+   * 只验证合法性的话, 这三种"什么都不生成"也能过。 */
+  function featOf(style, extra) {
+    var cfg = { thickness: 15, width: 800, depth: 320, height: 900, fit: 0.2,
+      jointStyle: style, lapStyle: 'plain', tenonCount: 3 };
+    Object.keys(extra || {}).forEach(function (k) { cfg[k] = extra[k]; });
+    var r = Custom.recipeUnit('grid', cfg);
+    var h = 0, m = 0, pk = 0;
+    r.parts.forEach(function (pt) {
+      h += pt.holes.length; m += (pt.marks || []).length; pk += (pt.pockets || []).length;
+    });
+    return { holes: h, marks: m, pockets: pk, info: r.info, parts: r.parts.length };
+  }
+  var fDowel = featOf('dowel'), fBisc = featOf('biscuit'), fTong = featOf('tongue');
+  var fWedge = featOf('wedge'), fFing = featOf('finger');
+  /* 木销: 母件板面孔可以切(holes) + 子件端面孔只能给标记(marks) */
+  chk('木销对接真的生成销孔+端面标记', fDowel.holes > 0 && fDowel.marks > 0,
+    'holes=' + fDowel.holes + ' marks=' + fDowel.marks);
+  /* 饼干: 定深槽(pockets), 且**不得**开榫眼 —— 它没有榫头 */
+  chk('饼干榫生成定深槽且不开榫眼', fBisc.pockets > 0 && fBisc.holes === 0,
+    'pockets=' + fBisc.pockets + ' holes=' + fBisc.holes);
+  /* 嵌槽: 母件停止槽(pockets), 同样不得开榫眼 */
+  chk('舌槽榫生成停止槽且不开榫眼', fTong.pockets > 0 && fTong.holes === 0,
+    'pockets=' + fTong.pockets + ' holes=' + fTong.holes);
+  /* 楔钉: 楔口是通孔(比直榫多) + 楔子作为独立小件真的进料单 */
+  chk('楔钉榫多出楔口通孔', fWedge.holes > fFing.holes,
+    fWedge.holes + ' vs finger ' + fFing.holes);
+  chk('楔钉榫的楔子真的进了料单', fWedge.info.extraParts > 0 && fWedge.parts > fFing.parts,
+    'extraParts=' + fWedge.info.extraParts + ' parts=' + fWedge.parts + '/' + fFing.parts);
+  /* 降级必须显式落在 info 上, 且**四角**降级(没有通孔可穿) */
+  chk('楔钉/卡扣在四角降级为直榫', fWedge.info.cornerStyle === 'finger' &&
+    fWedge.info.midStyle === 'wedge', fWedge.info.cornerStyle + '/' + fWedge.info.midStyle);
+  chk('楔钉榫报出穿出量 grow', fWedge.info.grow > 0, fWedge.info.grow);
+  /* 燕尾在 90 度接合处必然干涉 -> 两个场合都降级 */
+  var fDove = featOf('dovetail');
+  chk('燕尾两个场合都降级为直榫',
+    fDove.info.cornerStyle === 'finger' && fDove.info.midStyle === 'finger',
+    fDove.info.cornerStyle + '/' + fDove.info.midStyle);
+  /* 降级必须**有话说** —— 静默降级会让用户以为自己做出了燕尾柜 */
+  var rDove = Custom.recipeUnit('grid', { thickness: 15, width: 800, depth: 320,
+    height: 900, fit: 0.2, jointStyle: 'dovetail', tenonCount: 3 });
+  chk('降级给出人话原因', rDove.warnings.some(function (m) {
+    return m.text.indexOf('\u71d5\u5c3e') >= 0 && m.text.indexOf('\u76f4\u69ab') >= 0;
+  }), rDove.warnings.map(function (m) { return m.level; }).join(','));
+
+  /* 样式专属参数必须真的能改变几何 —— 输入框存在但不生效是最难发现的坏法 */
+  var gd1 = featOf('tongue', { grooveDepth: 4 });
+  var gd2 = featOf('tongue', { grooveDepth: 9 });
+  function pkDepth(f) { return null; }
+  var rA = Custom.recipeUnit('grid', { thickness: 15, width: 800, depth: 320, height: 900,
+    fit: 0.2, jointStyle: 'tongue', grooveDepth: 4, tenonCount: 3 });
+  var rB = Custom.recipeUnit('grid', { thickness: 15, width: 800, depth: 320, height: 900,
+    fit: 0.2, jointStyle: 'tongue', grooveDepth: 9, tenonCount: 3 });
+  function firstPk(r) {
+    for (var i = 0; i < r.parts.length; i++) {
+      if ((r.parts[i].pockets || []).length) return r.parts[i].pockets[0].depth;
+    }
+    return -1;
+  }
+  chk('grooveDepth 真的改变槽深', firstPk(rA) > 0 && firstPk(rB) > firstPk(rA) + 3,
+    firstPk(rA) + ' -> ' + firstPk(rB));
+  var rD1 = Custom.recipeUnit('grid', { thickness: 15, width: 800, depth: 320, height: 900,
+    fit: 0.2, jointStyle: 'dowel', dowelCount: 2, tenonCount: 3 });
+  var rD2 = Custom.recipeUnit('grid', { thickness: 15, width: 800, depth: 320, height: 900,
+    fit: 0.2, jointStyle: 'dowel', dowelCount: 5, tenonCount: 3 });
+  function nHoles(r) { return r.parts.reduce(function (a, p) { return a + p.holes.length; }, 0); }
+  chk('dowelCount 真的改变销孔数', nHoles(rD2) > nHoles(rD1),
+    nHoles(rD1) + ' -> ' + nHoles(rD2));
+
+  /* 十字搭接口径: 勾齿必须真的改变轮廓(多出勾的那几个点) */
+  function lapOf(ls) {
+    var r = Custom.recipeUnit('winerack', { thickness: 15, width: 600, depth: 300,
+      height: 400, fit: 0.2, jointStyle: 'finger', lapStyle: ls, tenonCount: 3 });
+    var pe = 0, vtx = 0;
+    r.parts.forEach(function (pt) {
+      vtx += pt.outer.length;
+      pt.validate().forEach(function (m) { if (m.level === 'error') pe++; });
+    });
+    return { pe: pe, vtx: vtx, info: r.info.lapStyle };
+  }
+  var lp = lapOf('plain'), lh = lapOf('hook');
+  chk('lapStyle=hook 被采纳', lh.info === 'hook' && lp.info === 'plain', lp.info + '/' + lh.info);
+  chk('勾齿搭接真的多出勾的顶点', lh.vtx > lp.vtx, lp.vtx + ' -> ' + lh.vtx);
+  chk('两种搭接口径零件都合法', lp.pe === 0 && lh.pe === 0, lp.pe + '/' + lh.pe);
+  chk('未知搭接口径显式报警', Custom.recipeUnit('winerack', { thickness: 15, width: 600,
+    depth: 300, height: 400, fit: 0.2, lapStyle: 'nope' }).warnings.some(function (m) {
+      return m.text.indexOf('nope') >= 0;
+    }));
+})();
+
+/* ============================================================
+ * 13) 舌与槽的 inset 必须用**同一个板厚**算出来
+ *
+ * jointOpts 以前没把 thickness 打包进去, 而 tongueInsetOf 的兜底是 12mm:
+ * 于是"舌"(profile 侧, 拿不到 thickness -> 按 12 算) 与"槽"(styleExtras 侧,
+ * 调用方传了 thickness) 用了两个不同的缩进量。
+ * 实测 t=25/L=300: 舌 [5.45, 294.55], 槽 [9.75, 290.25] ——
+ * 舌比槽两端各长 4.3mm, 插进去会顶在没铣到的实料上, 肩永远合不严。
+ * 两个环各自都合法, 所以谁都没报错。
+ * ============================================================ */
+(function () {
+  [9, 12, 15, 18, 21, 25].forEach(function (t) {
+    var sp = J.spansFor(300, { t: t });
+    var f = G.frame(G.P(0, 0), G.P(300, 0));
+    var o = { fit: 0.2, thickness: t };
+    var prof = J.tongueProfile(sp, t, o);
+    var ex = J.styleExtras('tongue', sp, f, t, 'host', o);
+    var gb = G.loopBBox(ex.pockets[0].loop);
+    var tb = G.loopBBox(G.cleanLoop(prof.map(function (q) { return f.at(q.u, q.v); })));
+    /* 槽必须完整包住舌, 且两端各留一点余量(平底刀在槽端会留圆角) */
+    chk('t=' + t + ': 停止槽完整包住舌', gb.x0 <= tb.x0 + 1e-9 && gb.x1 >= tb.x1 - 1e-9,
+      '槽[' + G.round(gb.x0, 2) + ',' + G.round(gb.x1, 2) + '] 舌[' +
+      G.round(tb.x0, 2) + ',' + G.round(tb.x1, 2) + ']');
+  });
+})();
+
+/* ============================================================
+ * 14) \u5bb6\u5177\u7c7b\u578b\u5e76\u5165\u7ed3\u6784\u914d\u65b9\uff08\u7b2c 9 \u8f6e item3\uff09
+ *
+ * \u65e7\u7248\u6709\u4e24\u5957\u5e73\u884c\u7684\u5165\u53e3: \u9876\u90e8"\u5bb6\u5177\u7c7b\u578b"7 \u4e2a chip(\u81ea\u5e26 EXTRA/DEFAULTS \u4e24\u5f20\u8868)
+ * \u4e0e"\u7ed3\u6784\u914d\u65b9"6 \u79cd(\u81ea\u5e26 fields \u8868)\u3002\u4e24\u5957\u8868\u804c\u8d23\u5b8c\u5168\u91cd\u53e0,
+ * \u771f\u6b63\u7684\u4ee3\u4ef7\u4e0d\u662f\u591a\u5199\u51e0\u884c, \u800c\u662f**\u65b0\u589e\u4e00\u79cd\u7ed3\u6784\u65f6\u5f88\u5bb9\u6613\u53ea\u6539\u4e00\u8fb9**,
+ * \u7136\u540e\u90a3\u4e2a\u53c2\u6570\u9ed8\u9ed8\u5931\u6548\u3002\u73b0\u5728\u7edf\u4e00\u6210 16 \u4e2a\u914d\u65b9\u3001\u4e00\u5f20\u8868\u3001\u4e00\u4e2a\u6e32\u67d3\u51fd\u6570\u3002
+ * ============================================================ */
+(function () {
+  var list = Custom.recipeList();
+  chk('\u914d\u65b9\u6570 = 16', list.length === 16, list.length);
+  /* \u65e7\u7684\u4e94\u4e2a\u5bb6\u5177\u7c7b\u578b\u540d\u5fc5\u987b\u90fd\u5728\u914d\u65b9\u91cc \u2014\u2014 \u5426\u5219\u5bfc\u5165\u65e7\u53c2\u6570 JSON \u4f1a\u627e\u4e0d\u5230\u7ed3\u6784 */
+  ['box', 'bookshelf', 'drawer', 'lattice', 'table'].forEach(function (k) {
+    chk('\u65e7\u5bb6\u5177\u7c7b\u578b ' + k + ' \u5df2\u6210\u914d\u65b9', !!Custom.RECIPES[k]);
+  });
+  /* \u6bcf\u4e2a\u914d\u65b9\u90fd\u5fc5\u987b\u58f0\u660e\u63a8\u8350\u5c3a\u5bf8\u3002
+   * \u3010\u4e3a\u4f55\u662f\u786c\u6307\u6807\u3011dims \u7f3a\u5931\u65f6 UI \u6362\u914d\u65b9\u4e0d\u4f1a\u6362\u5c3a\u5bf8, \u4e8e\u662f\u62ff\u7740\u4e0a\u4e00\u4e2a\u914d\u65b9\u7684
+   * \u5c3a\u5bf8\u786c\u7b97 \u2014\u2014 \u5b9e\u6d4b\u4ece"\u957f\u51f3"(1200x350x450)\u5207\u5230"\u4e0d\u89c4\u5219\u683c\u67dc"\u4f1a\u5f97\u5230\u4e00\u4e2a
+   * 450 \u9ad8\u7684"\u67dc\u5b50", \u65b0\u7ad6\u9694\u677f\u53ea\u80fd\u8dcf 424mm \u800c\u65ad\u8a00\u671f\u671b\u5b83\u5c0f\u4e8e\u5355\u683c\u9ad8\u3002 */
+  list.forEach(function (rc) {
+    var d = Custom.recipeDims(rc.key);
+    chk('\u914d\u65b9 ' + rc.key + ' \u6709\u63a8\u8350\u5c3a\u5bf8', !!d && d.width > 0 && d.depth > 0 && d.height > 0 && d.thickness > 0,
+      JSON.stringify(d));
+    chk('\u914d\u65b9 ' + rc.key + ' \u6709\u5206\u7c7b', !!rc.group, rc.group);
+  });
+  /* expandable \u5fc5\u987b\u4e0e"\u771f\u7684\u80fd\u4e0d\u80fd\u5c55\u5f00"\u4e00\u81f4 \u2014\u2014 UI \u9760\u5b83\u7f6e\u7070\u6309\u94ae */
+  list.forEach(function (rc) {
+    var pn = Custom.recipePanels(rc.key, Custom.recipeDims(rc.key));
+    chk('\u914d\u65b9 ' + rc.key + ' expandable \u4e0e\u5b9e\u9645\u4e00\u81f4',
+      rc.expandable === (pn.length > 0), rc.expandable + '/' + pn.length);
+    chk('recipeExpandable \u4e0e recipeList \u4e00\u81f4', Custom.recipeExpandable(rc.key) === rc.expandable);
+  });
+  /* 5 \u4e2a build \u578b\u5fc5\u987b\u8fd4\u56de false: \u5b83\u4eec\u542b\u5f02\u5f62\u677f/\u4e92\u8865\u54ac\u5408, \u677f\u4f4d\u8868\u63cf\u8ff0\u4e0d\u4e86 */
+  ['box', 'bookshelf', 'drawer', 'lattice', 'table'].forEach(function (k) {
+    chk('build \u578b ' + k + ' \u4e0d\u53ef\u5c55\u5f00\u677f\u4f4d\u8868', Custom.recipeExpandable(k) === false);
+  });
+  /* \u5206\u7c7b\u540d\u5355\u4e0d\u5f97\u6f0f\u6389\u4efb\u4f55\u914d\u65b9\u7684 group */
+  var gs = Custom.recipeGroups();
+  chk('recipeGroups \u975e\u7a7a', gs.length >= 2, gs.join(','));
+  list.forEach(function (rc) {
+    chk('\u914d\u65b9 ' + rc.key + ' \u7684\u5206\u7c7b\u5728 recipeGroups \u91cc', gs.indexOf(rc.group) >= 0, rc.group);
+  });
+  /* \u63a5\u5408\u8ba1\u6570\u5fc5\u987b\u5168\u5e93\u7edf\u4e00\u7528 tenonJoints/lapJoints \u2014\u2014 UI \u7edf\u8ba1\u6761\u53ea\u8ba4\u8fd9\u4e24\u4e2a\u3002
+   * \u65e7\u7248\u5bb6\u5177\u6a21\u578b(box/bookshelf/drawer/lattice/table)\u4e00\u4e2a\u90fd\u4e0d\u62a5,
+   * \u5e76\u5165\u914d\u65b9\u540e\u4f1a\u5728 16 \u79cd\u7ed3\u6784\u91cc\u5ff5 5 \u79cd\u4e0d\u663e\u793a\u63a5\u5408\u6570\u3002 */
+  list.forEach(function (rc) {
+    var d = Custom.recipeDims(rc.key);
+    var u = Custom.recipeUnit(rc.key, {
+      thickness: d.thickness, width: d.width, depth: d.depth, height: d.height, fit: 0.2
+    });
+    chk('\u914d\u65b9 ' + rc.key + ' \u62a5\u51fa\u63a5\u5408\u6570',
+      (u.info.tenonJoints || 0) + (u.info.lapJoints || 0) > 0,
+      'tenon=' + u.info.tenonJoints + ' lap=' + u.info.lapJoints);
+    chk('\u914d\u65b9 ' + rc.key + ' info \u5e26 recipe \u6eaf\u6e90', u.info.recipe === rc.key, u.info.recipe);
+  });
+  /* select \u5b57\u6bb5(backStyle)\u5fc5\u987b\u771f\u7684\u751f\u6548\u3002
+   * normParams \u4e0d\u8ba4 'select' \u65f6 'tenon' \u4f1a\u88ab num() \u53d8\u6210 0 -> \u80cc\u677f\u9009\u9879\u6c38\u8fdc\u5931\u6548\u3002 */
+  var withBack = Custom.recipeUnit('shoerack', { thickness: 15, width: 800, depth: 320, height: 800, fit: 0.2, backStyle: 'tenon' });
+  var noBack = Custom.recipeUnit('shoerack', { thickness: 15, width: 800, depth: 320, height: 800, fit: 0.2, backStyle: 'none' });
+  chk('select \u5b57\u6bb5 backStyle \u771f\u7684\u751f\u6548\uff08\u591a\u4e00\u5757\u80cc\u677f\uff09',
+    withBack.parts.length === noBack.parts.length + 1,
+    withBack.parts.length + ' vs ' + noBack.parts.length);
+  chk('backStyle=tenon \u96f6\u4ef6\u4ecd\u5408\u6cd5', errsOf(withBack.parts).length === 0, errsOf(withBack.parts).slice(0, 2).join('|'));
+  /* \u672a\u77e5\u914d\u65b9\u4e0d\u5f97\u9ed8\u9ed8\u9000\u5316\u6210\u683c\u67dc */
+  chk('recipeDims(\u672a\u77e5) = null', Custom.recipeDims('nope') === null);
+  chk('recipeExpandable(\u672a\u77e5) = false', Custom.recipeExpandable('nope') === false);
+})();
+
+/* ============================================================
+ * 15) 16 \u914d\u65b9 x 11 \u6837\u5f0f x 6 \u677f\u539a x 3 \u7ec4\u5c3a\u5bf8 \u5168\u53c2\u6570\u626b\u63cf
+ *
+ * \u8fd9\u662f item3 \u7684\u9a8c\u6536\u5173: \u65b0\u589e\u7684 10 \u4e2a\u914d\u65b9\u4e0d\u80fd\u53ea\u5728\u63a8\u8350\u5c3a\u5bf8\u4e0a\u80fd\u8dd1\u3002
+ * \u626b\u63cf\u5df2\u7ecf\u62b3\u51fa\u4e24\u4e2a\u771f\u5b9e\u7f3a\u9677:
+ *   1) nightstand/shoerack/tvstand \u7684\u5c42\u677f\u753b\u6210\u4e86\u6574\u6df1 D, \u800c\u80cc\u677f\u5d4c\u5728\u8ddd\u540e\u6cbf t/2 \u5904
+ *      \u4e0e\u4fa7\u677f\u662f\u89d2\u63a5 -> \u4fa7\u677f\u540e\u6cbf\u88ab\u6316\u51fa\u4e00\u6392\u5185\u7f29\u8ba9\u4f4d\u7f3a\u53e3\u3002\u5c42\u677f\u7684\u5d4c\u69fd/\u997c\u5e72\u69fd
+ *      \u94e3\u5230\u534a\u8def\u6599\u5df2\u7ecf\u6ca1\u4e86 -> "\u94e3\u69fd\u8d8a\u51fa\u677f\u8fb9"\u3002\u5df2\u7edf\u4e00\u6539\u8d70 innerDepth()\u3002
+ *   2) mirrorProf \u628a\u5f27\u6bb5 bulge \u5f52\u5c5e\u7684\u9876\u70b9\u9519\u4e86\u4e00\u4f4d(\u8be6\u89c1 custom.js \u91cc\u7684\u957f\u6ce8\u91ca)\u3002
+ * ============================================================ */
+(function () {
+  var bad = [], n = 0;
+  Custom.recipeList().forEach(function (rc) {
+    var d = Custom.recipeDims(rc.key);
+    /* \u4e09\u7ec4\u5c3a\u5bf8: \u63a8\u8350 / \u5f88\u5c0f / \u5f88\u5927\u3002\u5c0f\u5c3a\u5bf8\u662f\u771f\u5b9e\u573a\u666f(\u684c\u9762\u6446\u4ef6),
+     * \u4e5f\u662f\u6700\u5bb9\u6613\u628a"\u677f\u539a\u76f8\u5bf9\u5c3a\u5bf8\u8fc7\u5927"\u7684\u8fb9\u754c\u6761\u4ef6\u9732\u51fa\u6765\u7684\u4e00\u7ec4\u3002 */
+    var dims = [
+      [d.width, d.depth, d.height],
+      [Math.max(200, d.width * 0.4), Math.max(120, d.depth * 0.5), Math.max(200, d.height * 0.4)],
+      [d.width * 1.6, d.depth * 1.3, d.height * 1.4]
+    ];
+    J.STYLES.forEach(function (st) {
+      [9, 12, 15, 18, 21, 25].forEach(function (t) {
+        dims.forEach(function (dm) {
+          n++;
+          var u = Custom.recipeUnit(rc.key, {
+            thickness: t, width: dm[0], depth: dm[1], height: dm[2],
+            fit: 0.2, jointStyle: st.key
+          });
+          /* \u53ea\u770b error \u7ea7: \u5c3a\u5bf8\u6781\u7aef\u65f6\u62a5 warn/"\u5c3a\u5bf8\u76f8\u5bf9\u677f\u539a\u8fc7\u5c0f" \u662f\u6b63\u786e\u884c\u4e3a,
+           * \u4f46**\u4e0d\u5f97\u4ea7\u51fa\u975e\u6cd5\u96f6\u4ef6**(\u5b54\u8d8a\u51fa\u677f\u8fb9 / \u8f6e\u5ed3\u81ea\u4ea4 \u7b49)\u3002 */
+          var e = errsOf(u.parts);
+          /* \u8f6e\u5ed3\u81ea\u4ea4\u7c7b\u786c\u9519\u4e5f\u5f97\u62b3 \u2014\u2014 \u5b83\u4eec\u4ee5 warnings.error \u5f62\u5f0f\u51fa\u73b0 */
+          u.warnings.forEach(function (m) {
+            if (m.level !== 'error') return;
+            /* "\u5c3a\u5bf8\u76f8\u5bf9\u677f\u539a\u8fc7\u5c0f" / "\u957f\u5ea6\u4e3a\u8d1f" \u8fd9\u7c7b\u662f\u5bf9\u7528\u6237\u53c2\u6570\u77db\u76fe\u7684\u6b63\u786e\u62a5\u9519,
+             * \u4e0d\u7b97\u7f3a\u9677\u3002\u53ea\u62b3\u51e0\u4f55\u5c42\u9762\u7684"\u5df2\u5254\u9664/\u8d8a\u51fa\u677f\u8fb9"\u3002 */
+            if (/\u5254\u9664|\u8d8a\u51fa\u677f\u8fb9|\u81ea\u4ea4/.test(m.text)) e.push('W:' + m.text);
+          });
+          if (e.length) bad.push(st.key + '/t' + t + '/' + rc.key + '/' + dm.join('x') + ': ' + e[0].slice(0, 80));
+        });
+      });
+    });
+  });
+  chk('\u5168\u53c2\u6570\u626b\u63cf: ' + n + ' \u7ec4\u7ec4\u5408\u96f6\u4ef6\u5168\u90e8\u5408\u6cd5', bad.length === 0,
+    bad.length + ' \u7ec4\u5931\u8d25, \u4f8b: ' + bad.slice(0, 3).join(' | '));
+})();
+
+/* ============================================================
+ * 16) mirrorProf: \u5f27\u6bb5 bulge \u5fc5\u987b\u968f\u53cd\u5411\u632a\u4e00\u4e2a\u9876\u70b9\uff0c\u7b26\u53f7\u4e0d\u53d8
+ *
+ * \u73af\u7684\u5b58\u50a8\u7ea6\u5b9a\u662f\u300cb \u6302\u5728\u5f27\u7684**\u8d77\u70b9**\u4e0a\u300d\u3002\u953c\u50cf+\u53cd\u5411\u540e\u904d\u5386\u65b9\u5411\u53d8\u4e86,
+ * \u539f\u6765\u7684\u8d77\u70b9\u53d8\u6210\u7ec8\u70b9 -> b \u5fc5\u987b\u5f80\u540e\u632a\u4e00\u4e2a\u9876\u70b9; \u800c\u953c\u50cf\u7ffb\u4e00\u6b21\u624b\u5f81\u3001
+ * \u53cd\u5411\u53c8\u7ffb\u4e00\u6b21 -> \u4e24\u6b21\u62b5\u6d88, \u7b26\u53f7**\u4e0d\u53d8**\u3002\u65e7\u7248\u521a\u597d\u53cd\u4e86\u4e24\u5934\u3002
+ *
+ * \u540e\u679c\u662f\u9759\u9ed8\u51fa\u5e9f\u56fe: bench t=15/fillet \u7684\u677f\u817f\u4e0a\u8fb9\u69ab\u5934\u6839\u90e8\u5012\u5706\u672c\u5e94\u5411\u5185\u51f9,
+ * \u953c\u50cf\u540e\u53d8\u6210\u5f27\u5fc3\u8dd1\u5230\u5916\u4fa7 -> \u8f6e\u5ed3\u5411\u5185\u51f9\u8fdb 5mm(y \u4ece 435 \u5230 414.8),
+ * \u628a\u672c\u8be5\u662f\u6750\u6599\u7684\u533a\u57df\u6316\u6210\u7a7a; \u540c\u4f4d\u7f6e\u7684\u69ab\u773c\u843d\u5728\u7a7a\u6c14\u4e0a\u88ab\u5254\u9664 ->
+ * \u677f\u817f\u5c11\u4e00\u4e2a\u69ab\u773c\u3001\u5750\u9762\u5374\u7167\u6837\u51fa\u4e24\u4e2a\u69ab\u5934 -> \u88c5\u4e0d\u4e0a\u3002
+ * \u7eaf\u76f4\u7ebf\u7684 finger \u6c38\u8fdc\u6b63\u5e38, \u6240\u4ee5\u5355\u6d4b finger \u53d1\u73b0\u4e0d\u4e86\u3002
+ * ============================================================ */
+(function () {
+  /* \u76f4\u63a5\u91cf\u51e0\u4f55: \u5e26\u5f27\u7684\u6837\u5f0f\u5728**\u953c\u50cf\u8fb9**(bench \u7684\u677f\u817f\u4e0a\u8fb9\u5c31\u662f top \u8fb9)
+   * \u4e0a\u4e0d\u5f97\u628a\u8f6e\u5ed3\u5f80\u6750\u6599\u5185\u90e8\u51f9\u8fdb\u53bb\u3002 */
+  ['finger', 'round', 'fillet', 'mitre'].forEach(function (stk) {
+    var u = Custom.recipeUnit('bench', {
+      thickness: 15, width: 1200, depth: 350, height: 450, fit: 0.2, jointStyle: stk
+    });
+    var leg = u.parts.filter(function (p) { return p.name.indexOf('\u5de6\u677f\u817f') >= 0; })[0];
+    chk('mirrorProf[' + stk + ']: \u677f\u817f\u5b58\u5728', !!leg);
+    if (!leg) return;
+    var f = G.flatten(leg.outer, 0.05);
+    /* \u5750\u9762\u5e95\u9762\u5728 y=435(=H-t), 435..450 \u662f\u69ab\u5934\u533a\u3002
+     * y \u5728 (380, 434.9) \u8fd9\u4e00\u5e26\u5e94\u8be5\u5168\u662f\u5b9e\u6599 \u2014\u2014 \u8f6e\u5ed3\u4e0d\u5f97\u6709\u9876\u70b9\u843d\u5728\u8fd9\u91cc\u3002
+     * \u65e7\u7248 fillet \u4f1a\u51f9\u5230 414.73, round \u4f1a\u51f9\u5230 430.81\u3002 */
+    var dip = f.filter(function (q) { return q.y > 380 && q.y < 434.9; });
+    chk('mirrorProf[' + stk + ']: \u953c\u50cf\u8fb9\u7684\u5f27\u4e0d\u5f80\u6599\u5185\u51f9',
+      dip.length === 0,
+      dip.length ? ('minY=' + G.round(Math.min.apply(null, dip.map(function (q) { return q.y; })), 2)) : 'ok');
+    /* \u4e24\u7247\u677f\u817f\u5fc5\u987b\u5404\u62ff\u5230**\u4e24\u4e2a**\u69ab\u773c(\u5750\u9762\u7684\u4e24\u4e2a\u69ab\u5934) */
+    chk('mirrorProf[' + stk + ']: \u677f\u817f\u69ab\u773c\u6570\u4e0e finger \u4e00\u81f4', (leg.holes || []).length === 2,
+      (leg.holes || []).length);
+    chk('mirrorProf[' + stk + ']: \u65e0\u786c\u9519', u.warnings.filter(function (m) {
+      return m.level === 'error';
+    }).length === 0, u.warnings.filter(function (m) { return m.level === 'error'; })
+      .map(function (m) { return m.text; }).slice(0, 1).join(''));
+  });
+})();
+
+} catch (e) { L.push('FAIL exception ' + e.message + '\n' + (e.stack || '')); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>

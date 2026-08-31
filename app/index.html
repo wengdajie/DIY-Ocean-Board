@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海洋板 DIY · 榫卯 CAD 图纸生成器</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header>
+  <h1>海洋板 DIY · 榫卯 CAD 生成器</h1>
+  <span class="tag" id="verTag">离线可用</span>
+  <span class="spacer"></span>
+  <button id="btnLayoutReset" title="把左侧参数栈宽度、三视图高度恢复到默认">布局复位</button>
+  <span class="tag" id="selfTest">自检 —</span>
+</header>
+
+<main>
+  <!-- ============ 参数栏 ============ -->
+  <aside id="side">
+    <h2>从哪里开始</h2>
+    <div class="chips" id="modelChips">
+      <span class="chip on" data-model="custom">结构配方</span>
+      <span class="chip" data-model="image">图片生成</span>
+    </div>
+    <p class="hint" id="modeHint">选一种现成结构（箱体柜、书架、桌凳、酒格……共 16 种），填几个参数，榫卐全自动。
+      想自己摆板就用「零件清单」或「板位表」。</p>
+
+    <!-- ---------- 图片模式 ---------- -->
+    <div id="imgSec" style="display:none">
+      <h2>图片来源</h2>
+      <div id="drop">
+        <b>拖入图片</b><br>
+        <span>或 点击选择 · Ctrl+V 粘贴</span>
+        <input type="file" id="imgFile" accept="image/*" hidden>
+      </div>
+      <div class="row"><label>图片信息</label><span class="val" id="imgInfo">未载入</span></div>
+      <div class="btns">
+        <button id="btnSample1">示例·小房子</button>
+        <button id="btnSample2">示例·渐变山</button>
+      </div>
+
+      <h2>生成方式</h2>
+      <div class="chips" id="imgModeChips">
+        <span class="chip on" data-imode="silhouette">轮廓件 + 底座</span>
+        <span class="chip" data-imode="layers">等高分层</span>
+      </div>
+      <p class="hint" id="imodeHint">按剪影切一块板，底部自动出榫，配一块开好榫眼的底座。</p>
+
+      <h2>二值化</h2>
+      <div class="row"><label>自动阈值 (Otsu)</label><input type="checkbox" id="autoThreshold" checked></div>
+      <div class="row"><label>阈值 <span class="val" id="thVal">128</span></label><input type="range" id="threshold" min="1" max="254" value="128"></div>
+      <div class="row"><label>反相（取白色）</label><input type="checkbox" id="invert"></div>
+      <div class="row"><label>只用透明通道</label><input type="checkbox" id="alphaOnly"></div>
+      <p class="hint">PNG 透明底的图勾选"只用透明通道"最准。线稿/剪影效果最好；照片请先自行去背。</p>
+      <div class="row"><label>去噪强度 <span class="val" id="dsVal">0.04%</span></label><input type="range" id="despeckle" min="0" max="60" value="4"></div>
+      <div class="row"><label>简化容差</label><input type="number" id="simplify" value="1.2" step="0.1" min="0" max="8"><span class="unit">mm</span></div>
+      <div class="row"><label>保角平滑</label><input type="checkbox" id="smooth" checked></div>
+      <p class="hint">平滑会先固定星角/直角等结构拐角，再把像素锯齿抹平，顶点数可降一个数量级。</p>
+
+      <h2>成品尺寸</h2>
+      <div class="row"><label>目标宽</label><input type="number" id="targetWidth" value="240" step="10" min="0"><span class="unit">mm</span></div>
+      <div class="row"><label>目标高</label><input type="number" id="targetHeight" value="0" step="10" min="0"><span class="unit">mm</span></div>
+      <p class="hint">两个都填 = 等比缩放取小者；填 0 = 该方向不限制。</p>
+
+      <div id="silSec">
+        <h2>立牌底座</h2>
+        <div class="row"><label>底座</label>
+          <select id="standStyle">
+            <option value="tenon" selected>自动出榫 + 底座</option>
+            <option value="none">不要底座</option>
+          </select>
+        </div>
+        <div class="row"><label>榫头宽</label><input type="number" id="tenonWidth" value="40" step="5" min="8"><span class="unit">mm</span></div>
+        <div class="row"><label>底座深</label><input type="number" id="baseDepth" value="0" step="10" min="0"><span class="unit">mm</span></div>
+        <div class="row"><label>底座外扩</label><input type="number" id="baseMargin" value="40" step="5" min="0"><span class="unit">mm</span></div>
+        <p class="hint">底座深填 0 = 自动（约 0.28 倍高度）。</p>
+        <h2>形状筛选</h2>
+        <div class="row"><label>最小零件面积</label><input type="number" id="minPartArea" value="25" step="25" min="0"><span class="unit">mm²</span></div>
+        <div class="row"><label>最多零件数</label><input type="number" id="maxParts" value="8" step="1" min="1" max="30"></div>
+      </div>
+
+      <div id="layerSec" style="display:none">
+        <h2>分层</h2>
+        <div class="row"><label>层数</label><input type="number" id="layerCount" value="4" step="1" min="2" max="12"></div>
+        <div class="row"><label>对位销孔径</label><input type="number" id="pinDia" value="6" step="1" min="0"><span class="unit">mm</span></div>
+        <p class="hint">销孔用于层间对位（配 φ6 木棒/竹签）；填 0 不打孔。灰度越深 = 越靠底层，适合浮雕/等高线/LOGO。</p>
+        <div class="row"><label>每层最多件数</label><input type="number" id="maxPerLayer" value="4" step="1" min="1" max="12"></div>
+      </div>
+    </div>
+
+    <!-- ---------- 自定义模式 ---------- -->
+    <div id="cusSec" style="display:none">
+      <h2>设计方式</h2>
+      <div class="chips" id="cusModeChips">
+        <span class="chip on" data-cmode="recipe">结构配方</span>
+        <span class="chip" data-cmode="panels">板位表</span>
+        <span class="chip" data-cmode="list">零件清单</span>
+      </div>
+      <p class="hint" id="cmodeHint">填表格就行：一行 = 一块板，长×宽×数量，再挑工艺（圆孔／腰形孔／洞洞板／四角切口／定深铣槽）。不需要懂 CAD。</p>
+
+      <!-- 清单模式 -->
+      <div id="listSec" style="display:none">
+        <h2>套用模板</h2>
+        <div class="row"><label>常见做法</label><select id="tplKey"></select></div>
+        <div class="btns">
+          <button class="primary" id="btnTpl">套用模板</button>
+          <button id="btnAddRow">＋ 加一行</button>
+        </div>
+        <p class="hint">模板会<b>替换</b>当前清单。清单在右侧「清单编辑」页里改，改完自动重算排样。</p>
+      </div>
+
+      <!-- 配方模式 -->
+      <div id="recipeSec">
+        <h2>结构配方</h2>
+        <div class="chips" id="recipeGroupChips"></div>
+        <div class="row"><label>结构类型</label><select id="recipeKey"></select></div>
+        <p class="hint" id="recipeHint"></p>
+        <div class="btns"><button id="btnRecipeDims">用该结构的推荐尺寸</button></div>
+        <p class="hint" id="recipeDimHint" style="display:none"></p>
+        <div id="recipeFields"></div>
+      </div>
+
+      <!-- 板位表模式 -->
+      <div id="panelsSec" style="display:none">
+        <h2>板位表</h2>
+        <p class="hint">每块板用<b>统一的六个数</b>描述：位置（左起 X／前起 Y／离地 Z）+ 尺寸（宽 W／深 D／高 H）。
+          板厚方向那一格会自动置灰。右侧「板位编辑」页可用<b>三视图点选</b>，不用手写坐标。</p>
+        <div class="btns"><button id="btnLoadPanels">从当前配方展开</button></div>
+        <div class="btns">
+          <button id="btnAddVert">＋ 竖隔板</button>
+          <button id="btnAddShelf">＋ 层板</button>
+        </div>
+        <div class="btns">
+          <button id="btnAddBack">＋ 背板</button>
+          <button id="btnDelPanel">删除选中</button>
+        </div>
+      </div>
+
+      <div class="btns"><button id="btnOpenEdit">打开编辑器 →</button></div>
+    </div>
+
+    <!-- ---------- 通用 ---------- -->
+    <div id="dimSec">
+      <h2>整体尺寸（外形）</h2>
+      <div class="row"><label>宽 W</label><input type="number" id="width" value="600" step="10" min="80"><span class="unit">mm</span></div>
+      <div class="row"><label>深 D</label><input type="number" id="depth" value="320" step="10" min="60"><span class="unit">mm</span></div>
+      <div class="row"><label>高 H</label><input type="number" id="height" value="720" step="10" min="80"><span class="unit">mm</span></div>
+    </div>
+
+    <h2>板材</h2>
+    <div class="row"><label>板厚 t</label>
+      <input type="number" id="thickness" value="15" step="0.5" min="3" max="60"><span class="unit">mm</span>
+    </div>
+    <div class="row tRow"><label>常用厚度</label>
+      <span id="thickChips">
+        <span class="chip tk" data-t="9">9</span><span class="chip tk" data-t="12">12</span>
+        <span class="chip tk on" data-t="15">15</span><span class="chip tk" data-t="18">18</span>
+        <span class="chip tk" data-t="21">21</span><span class="chip tk" data-t="25">25</span>
+      </span>
+    </div>
+    <p class="hint" id="thickHint">板厚可直接输入任意值（3～60mm，支持 0.5 步进与小数），榟宽/榟眼/槽宽全部跟着重算。</p>
+    <div class="row"><label>板材幅面</label>
+      <select id="sheetSize">
+        <option value="2440x1220" selected>2440 × 1220</option>
+        <option value="2440x1830">2440 × 1830</option>
+        <option value="3050x1220">3050 × 1220</option>
+        <option value="1220x1220">1220 × 1220</option>
+        <option value="600x400">600 × 400 (小板)</option>
+      </select>
+    </div>
+    <div class="row"><label>板边留白</label><input type="number" id="margin" value="10" step="1" min="0"><span class="unit">mm</span></div>
+    <div class="row"><label>零件间距</label><input type="number" id="gap" value="6" step="1" min="0"><span class="unit">mm</span></div>
+    <div class="row"><label>排样策略</label>
+      <select id="nestStrategy">
+        <option value="auto" selected>自动比选（最大利用率）</option>
+        <option value="area/baf">大件优先 · 面积最贴合</option>
+        <option value="area/bssf">大件优先 · 不留细条</option>
+        <option value="height/bl">按高度 · 尽量压低</option>
+        <option value="maxside/shelf">货架式（最规整）</option>
+      </select>
+    </div>
+    <p class="hint" id="nestHint">自动比选会把 25 种排版方案（5 种下料顺序 × 5 种放置口径）全跑一遍，按“板数最少 → 剩料越整”挑最优。
+      混尺寸零件常能直接省下一整张板；想要切得规整好数可选“货架式”。</p>
+    <div class="row"><label>实测板厚</label><input type="number" id="realThickness" value="0" step="0.1" min="0"><span class="unit">mm</span></div>
+    <p class="hint">海洋板标称 15mm 常有 ±0.5mm 偏差。量一下真实厚度填进来，榫眼/槽宽会按实测值走；填 0 = 用标称值。</p>
+    <div class="row"><label>遵守纹理方向</label><input type="checkbox" id="respectGrain" checked></div>
+    <p class="hint">勾上后，标了横纹/竖纹的零件排样时不会被转 90°（避免成品纹理串向）；关掉可提高板材利用率。</p>
+
+    <h2>榫卯参数</h2>
+    <div class="row" id="jsRow"><label>接合方式</label>
+      <select id="jointStyle"></select>
+    </div>
+    <p class="hint" id="jsHint"></p>
+    <p class="hint" id="jsFallHint" style="display:none"></p>
+    <div class="row" id="lapRow"><label>十字搭接口径</label>
+      <select id="lapStyle"></select>
+    </div>
+    <p class="hint" id="lapHint"></p>
+    <div class="row" id="dtRow" style="display:none"><label>燕尾角</label><input type="number" id="dovetailAngle" value="11" step="1" min="5" max="20"><span class="unit">°</span></div>
+    <div class="row jsx" id="tipRow" style="display:none"><label>榫顶倒圆 r</label><input type="number" id="tipRadius" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="rootRow" style="display:none"><label>榫根倒圆 r</label><input type="number" id="rootRadius" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="chamRow" style="display:none"><label>斜肩倒角量</label><input type="number" id="chamfer" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="wxRow" style="display:none"><label>穿出段长</label><input type="number" id="wedgeExt" value="0" step="1" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="wsRow" style="display:none"><label>楔口宽</label><input type="number" id="wedgeSlotW" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="wtRow" style="display:none"><label>楔口斜度</label><input type="number" id="wedgeTaper" value="0" step="0.5" min="0"><span class="unit">°</span></div>
+    <div class="row jsx" id="slipRow" style="display:none"><label>倒钩外伸</label><input type="number" id="snapLip" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="sbarbRow" style="display:none"><label>倒钩高</label><input type="number" id="snapBarb" value="0" step="0.2" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="sslitRow" style="display:none"><label>弹性缝宽</label><input type="number" id="snapSlit" value="0" step="0.2" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="gdRow" style="display:none"><label>嵌槽深</label><input type="number" id="grooveDepth" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="ddRow" style="display:none"><label>木销直径</label><input type="number" id="dowelDia" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="dcRow" style="display:none"><label>每处个数</label><input type="number" id="dowelCount" value="0" step="1" min="0"></div>
+    <div class="row jsx" id="bwRow" style="display:none"><label>饼干槽宽</label><input type="number" id="biscuitWide" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
+    <div class="row jsx" id="blRow" style="display:none"><label>饼干槽长</label><input type="number" id="biscuitLen" value="0" step="1" min="0"><span class="unit">mm</span></div>
+    <p class="hint jsx" id="jsxHint" style="display:none">这组样式专属尺寸全部支持 <b>0 = 自动</b>（按板厚按比例算）。它们只改接合部位，不会改变你填的外形尺寸。</p>
+    <div class="row" id="fwRow"><label>榫齿宽（目标）</label><input type="number" id="fingerW" value="0" step="5" min="0"><span class="unit">mm</span></div>
+    <p class="hint" id="fwHint">0 = 自动（约 2.2 倍板厚，齿数强制为奇数以保证左右对称）</p>
+    <div class="row" id="tcRow" style="display:none"><label>每处榫齿数</label><input type="number" id="tenonCount" value="3" step="2" min="1" max="15"></div>
+    <div class="row"><label>配合间隙</label><input type="number" id="fit" value="0.2" step="0.05" min="0" max="1"><span class="unit">mm</span></div>
+    <p class="hint">激光切割建议 0.1–0.2；CNC 铣削建议 0.1–0.3。此值为<b>总</b>配合间隙（榫两侧各让 1/4，槽两侧各让 1/4）。</p>
+
+    <h2>加工补偿</h2>
+    <div class="row"><label>切割方式</label>
+      <select id="machine">
+        <option value="laser" selected>激光（无需让位）</option>
+        <option value="cnc">CNC 铣削（需让位）</option>
+      </select>
+    </div>
+    <div class="row" id="toolRow" style="display:none"><label>刀具直径</label><input type="number" id="toolDia" value="3.175" step="0.1" min="0.3" max="25"><span class="unit">mm</span></div>
+    <div class="row tRow" id="toolChipRow" style="display:none"><label>常用刀径</label>
+      <span id="toolChips">
+        <span class="chip tk" data-d="3.175">3.175</span><span class="chip tk" data-d="4">4</span>
+        <span class="chip tk" data-d="6">6</span><span class="chip tk" data-d="6.35">6.35</span>
+        <span class="chip tk" data-d="8">8</span><span class="chip tk" data-d="10">10</span>
+      </span>
+    </div>
+    <p class="hint" id="toolHint" style="display:none">3.175mm（1/8"）与 6.35mm（1/4"）是最常见的两支平底铣刀。让位量按<b>刀半径</b>算，填多少都行（0.3～25mm）。</p>
+    <div class="row" id="reliefRow" style="display:none"><label>内角让位</label>
+      <select id="reliefType">
+        <option value="dogbone" selected>Dogbone 过切圆（省料）</option>
+        <option value="tbone">T-bone 矩形耳（不破外形线）</option>
+        <option value="none">不让位</option>
+      </select>
+    </div>
+    <div class="row" id="earRow" style="display:none"><label>耳槽长度</label><input type="number" id="earLen" value="2" step="0.25" min="1" max="4"><span class="unit">×r</span></div>
+    <p class="hint" id="earHint" style="display:none">T-bone 的耳槽必须沿边挖到 <b>2 倍刀半径</b>，刀心才够得着内角 —— 只挖 1 倍等于没让位（实测残料只减 13%）。想更保守可加大，但会多牺牲料。</p>
+    <div class="row"><label>刀缝补偿 kerf</label><input type="number" id="kerf" value="0" step="0.05" min="0"><span class="unit">mm</span></div>
+    <p class="hint">kerf 为切缝总宽度，导出时轮廓将外扩 kerf/2（孔内缩），使成品达到公称尺寸。</p>
+
+    <h2 id="extraHead">结构选项</h2>
+    <div id="extra"></div>
+
+    <div class="btns">
+      <button class="primary" id="btnGen">重新生成</button>
+      <button id="btnFit">适应窗口</button>
+    </div>
+    <h2>导出</h2>
+    <!-- 导出位置: 三档策略。
+         选了文件夹 -> 直写该文件夹(能一键导全部);
+         没选但勾了"每次问" -> 弹另存为对话框;
+         都没有(或浏览器不支持) -> 走默认下载目录。 -->
+    <div class="btns">
+      <button id="btnPickDir">选导出文件夹…</button>
+      <button id="btnClearDir" title="恢复成“每次弹另存为”或浏览器默认下载目录">清除</button>
+    </div>
+    <div class="row" id="askSaveRow">
+      <label for="askSave">每次导出问保存位置</label>
+      <input type="checkbox" id="askSave" checked>
+    </div>
+    <p class="hint" id="expPathHint">当前导出到：<b id="expPathVal">浏览器默认下载目录</b></p>
+    <div class="btns">
+      <button class="ok" id="btnDxfNest">DXF（排样整板）</button>
+      <button id="btnDxfParts">DXF（零件分列）</button>
+    </div>
+    <div class="btns">
+      <button id="btnSvg">SVG</button>
+      <button id="btnCsv">料单 CSV</button>
+      <button id="btnJson">参数 JSON</button>
+    </div>
+    <div class="btns">
+      <button id="btnFeatCsv">加工清单 CSV（孔/槽坐标）</button>
+    </div>
+    <div class="btns">
+      <button id="btnExportAll" title="DXF×2 + SVG + 料单 CSV + 加工清单 CSV + 参数 JSON 一次写完">导出全部（6 个文件）</button>
+    </div>
+  </aside>
+
+  <!-- 参数栏 / 视图区 的拖拽分隔条。
+       role=separator + aria-* 是为了键盘可操作(←/→ 微调, Home 复位)。 -->
+  <div id="splitV" class="splitter vert" role="separator" aria-orientation="vertical"
+       tabindex="0" title="拖动调宽度；双击或 Home 复位；←/→ 微调"></div>
+
+  <!-- ============ 视图 ============ -->
+  <section id="view">
+    <div id="tabs">
+      <div class="tab on" data-pane="nest">排样图</div>
+      <div class="tab" data-pane="parts">零件详图</div>
+      <div class="tab" data-pane="asm">3D 装配</div>
+      <div class="tab" data-pane="list">料单</div>
+      <div class="tab" data-pane="edit" id="tabEdit" style="display:none">清单编辑</div>
+      <div class="tab" data-pane="img" id="tabImg" style="display:none">图片预览</div>
+    </div>
+    <div id="msgs"></div>
+    <div class="stat" id="stat"></div>
+    <div id="stage">
+      <div class="pane on" data-pane="nest"><canvas id="cvNest"></canvas>
+        <div id="hud">滚轮缩放 · 拖动平移</div>
+        <div id="legend"><span><i style="background:#2f6bb0"></i>零件</span><br><span><i style="background:#c3b9a3"></i>留白线</span></div>
+      </div>
+      <div class="pane" data-pane="parts"><canvas id="cvParts"></canvas></div>
+      <div class="pane" data-pane="asm"><canvas id="cvAsm"></canvas>
+        <div id="hud2">拖动旋转 · 滚轮缩放 · Shift+拖动平移 · E 爆炸 · 点击选中</div>
+        <div id="asmTools">
+          <span class="chip" data-asmview="1" title="标准等轴测 (1)">等轴测</span>
+          <span class="chip" data-asmview="2" title="正视 (2)">正视</span>
+          <span class="chip" data-asmview="3" title="侧视 (3)">侧视</span>
+          <span class="chip" data-asmview="4" title="俯视 (4)">俯视</span>
+          <span class="sepv"></span>
+          <label class="expLab">爆炸
+            <input type="range" id="asmExplode" min="0" max="120" step="5" value="0">
+          </label>
+        </div>
+      </div>
+      <div class="pane" id="listPane" data-pane="list"></div>
+      <div class="pane" id="editPane" data-pane="edit">
+        <div id="editBar"></div>
+        <div id="alignBar"></div>
+        <div id="editGrid"></div>
+        <div id="splitH" class="splitter horz" role="separator" aria-orientation="horizontal"
+             tabindex="0" title="拖动调三视图高度；双击或 Home 复位；↑/↓ 微调"></div>
+        <div id="planWrap"><canvas id="cvPlan"></canvas>
+          <div id="planHud">点击任一视图里的矩形可选中该板</div>
+        </div>
+      </div>
+      <div class="pane" data-pane="img"><canvas id="cvImg"></canvas>
+        <div id="imgTools">
+          <span class="chip on" data-pmode="overlay">叠加</span>
+          <span class="chip" data-pmode="mask">掩膜</span>
+          <span class="chip" data-pmode="image">原图</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="js/geom.js"></script>
+<script src="js/joints.js"></script>
+<script src="js/part.js"></script>
+<script src="js/models.js"></script>
+<script src="js/imagetrace.js"></script>
+<script src="js/imagemodel.js"></script>
+<script src="js/features.js"></script>
+<script src="js/custom.js"></script>
+<script src="js/cutlist.js"></script>
+<script src="js/nest.js"></script>
+<script src="js/render.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

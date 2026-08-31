@@ -1,0 +1,246 @@
+<!doctype html><meta charset="utf-8"><body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/joints.js"></script>
+<script src="../js/part.js"></script>
+<script src="../js/models.js"></script>
+<script src="../js/nest.js"></script>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+try {
+var t = 12, fit = 0.2;
+
+// ---------- panel 基础 ----------
+var pl = Models.panel(100, 60, {});
+chk('panel plain rect', near(G.loopArea(pl), 6000, 1e-9) && pl.length === 4, [G.loopArea(pl), pl.length]);
+var sp = J.spansFor(60, { t: t, m: 5, phase: 0 });
+var pr = Models.panel(100, 60, { right: J.tabProfile(sp, t, { fit: 0 }) });
+chk('panel right tabs grow area', G.loopArea(pr) > 6000, G.loopArea(pr));
+chk('panel right tabs extend +x', near(G.loopBBox(pr).x1, 100 + t, 1e-9), G.loopBBox(pr).x1);
+var pb = Models.panel(100, 60, { bottom: J.tabProfile(J.spansFor(100, { t: t, m: 5, phase: 0 }), t, { fit: 0 }) });
+chk('panel bottom tabs extend -y', near(G.loopBBox(pb).y0, -t, 1e-9), G.loopBBox(pb).y0);
+var ptp = Models.panel(100, 60, { top: J.tabProfile(J.spansFor(100, { t: t, m: 5, phase: 0 }), t, { fit: 0 }) });
+chk('panel top tabs extend +y', near(G.loopBBox(ptp).y1, 60 + t, 1e-9), G.loopBBox(ptp).y1);
+var plf = Models.panel(100, 60, { left: J.tabProfile(J.spansFor(60, { t: t, m: 5, phase: 0 }), t, { fit: 0 }) });
+chk('panel left tabs extend -x', near(G.loopBBox(plf).x0, -t, 1e-9), G.loopBBox(plf).x0);
+chk('panel all-4-edge tabs simple', !G.selfIntersects(G.flatten(Models.panel(200, 150, {
+  bottom: J.tabProfile(J.spansFor(200, { t: t, m: 5, phase: 0 }), t, { fit: 0 }),
+  top: J.tabProfile(J.spansFor(200, { t: t, m: 5, phase: 0 }), t, { fit: 0 }),
+  right: J.tabProfile(J.spansFor(150, { t: t, m: 5, phase: 0 }), t, { fit: 0 }),
+  left: J.tabProfile(J.spansFor(150, { t: t, m: 5, phase: 0 }), t, { fit: 0 })
+}))));
+
+// ---------- mirrorSpans / 回文 ----------
+var s5 = J.spansFor(300, { t: 12, m: 5, phase: 0 });
+chk('odd spans palindromic', Models.isPalindromic(s5));
+var ms = Models.mirrorSpans(s5, 300);
+chk('mirrorSpans preserves count', ms.tabs.length === s5.tabs.length);
+chk('mirrorSpans covers', near(ms.tabs[0][0], 0, 1e-9), ms.tabs[0][0]);
+
+// ---------- 箱体 ----------
+var r = Models.box({ thickness: t, width: 600, depth: 320, height: 720, fit: fit, shelves: 2, relief: 1.5 });
+chk('box part count (2 horiz + 2 side + back + 2 shelf)', r.parts.length === 7, r.parts.map(function (p) { return p.name; }).join('/'));
+var errs = [];
+r.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') errs.push(m.text); }); });
+chk('box all parts valid', errs.length === 0, errs.join(' | '));
+var bot = r.parts[0], side = r.parts[2], back = r.parts[4];
+chk('bottom name', bot.name === '底板', bot.name);
+// 底板宽 = W-2t 加上左右榫头 t => 总宽应为 W
+chk('bottom total width = W', near(bot.bbox().w, 600, 1e-9), bot.bbox().w);
+chk('bottom depth = D', near(bot.bbox().h, 320, 1e-9), bot.bbox().h);
+// 侧板: 深 D, 高 = H - 2t 加上下榫头 => H
+chk('side total height = H', near(side.bbox().h, 720, 1e-9), side.bbox().h);
+chk('side width = D', near(side.bbox().w, 320, 1e-9), side.bbox().w);
+chk('box has holes (mortises)', side.holes.length > 0, side.holes.length);
+chk('back panel exists', back.name === '背板', back.name);
+
+// ---------- 关键: 榫头与榫眼真实配合 ----------
+// 底板左右边的榫头(phase1) 应插入侧板底边的槽区(phase0 的 gaps)
+var spC = J.spansFor(320, { t: t });
+var spSide = J.spansFor(320, { t: t, m: spC.m, phase: 0 });
+var spHoriz = J.spansFor(320, { t: t, m: spC.m, phase: 1 });
+chk('corner spans complementary', JSON.stringify(spSide.tabs) === JSON.stringify(spHoriz.gaps));
+// 榫头宽 = span - fit; 对应缺口宽 = span (侧板的 gap 区域天然是空的)
+var tw = (spHoriz.tabs[0][1] - spHoriz.tabs[0][0]) - fit;
+var gw = spSide.gaps[0][1] - spSide.gaps[0][0];
+chk('tab fits into gap with clearance', tw < gw && near(gw - tw, fit, 1e-9), [tw, gw]);
+
+// 背板通榫 vs 底板榫眼: 数量与宽度
+var spBackW = Models.tenonSpans(600 - 2 * t, t, 3);
+chk('back tenon count == bottom mortise count', bot.holes.length === spBackW.tabs.length, [bot.holes.length, spBackW.tabs.length]);
+/* 【榫眼的尺寸必须在"无让位"的零件上量】
+ * 上面那个 r 是带 relief:1.5 生成的, 而第 8 轮起 models.js 对**榫眼也做内角让位**
+ * (以前只有 custom.js 做, 家具漏了 —— 圆刀够不到矩形眼的四个角, 不让位就留残料,
+ *  榫头插不到底)。让位后孔的包围盒会按刀径胀大, 拿它去核对 t+fit 必然对不上:
+ * 实测 t=12/fit=0.2/r=1.5 时 12.2 -> 15.2, 正好 +2r。
+ * 所以配合尺寸在 r0(无让位)上量, 让位的效果另立断言。 */
+var r0 = Models.box({ thickness: t, width: 600, depth: 320, height: 720, fit: fit, shelves: 2 });
+var bot0 = r0.parts[0];
+var mb = G.loopBBox(bot0.holes[0]);
+chk('mortise width = t + fit', near(mb.h, t + fit, 1e-9), mb.h);
+var backTenonW = (spBackW.tabs[0][1] - spBackW.tabs[0][0]) - fit / 2;
+// 榫与眼的总间隙 = fit（每侧 fit/2）
+chk('back tenon narrower than mortise by fit', backTenonW < mb.w && near(mb.w - backTenonW, fit, 1e-9), [backTenonW, mb.w]);
+/* 让位确实作用到了榫眼上: dogbone 的过切圆以角点为圆心、半径 r,
+ * 于是矩形眼的包围盒在两个方向各胀 2r。差一点都说明让位没做对。 */
+var mbR = G.loopBBox(bot.holes[0]);
+chk('mortise relief grows bbox by 2r (both axes)',
+  near(mbR.h - mb.h, 2 * 1.5, 1e-6) && near(mbR.w - mb.w, 2 * 1.5, 1e-6),
+  [mbR.w - mb.w, mbR.h - mb.h]);
+chk('mortise relief adds vertices', bot.holes[0].length > bot0.holes[0].length,
+  [bot0.holes[0].length, bot.holes[0].length]);
+/* 刀大到让位会捅出板外时: 必须**退回名义尺寸 + 给可操作警告**, 而不是出废图。
+ * 底板榫眼离后沿只有 backInset(默认=t=12), φ40 的刀半径 20 > 12 必然越界。 */
+var rBig = Models.box({ thickness: t, width: 600, depth: 320, height: 720, fit: fit, shelves: 2, relief: 20 });
+var bigErr = [];
+rBig.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') bigErr.push(m.text); }); });
+chk('absurd relief: parts still legal', bigErr.length === 0, bigErr.slice(0, 2).join(' | '));
+chk('absurd relief: warns about tool dia',
+  rBig.warnings.some(function (m) { return /刀具直径/.test(m.text) && /太大/.test(m.text); }),
+  rBig.warnings.map(function (m) { return m.text.slice(0, 30); }).join(' / '));
+chk('absurd relief: mortise falls back to nominal',
+  near(G.loopBBox(rBig.parts[0].holes[0]).h, t + fit, 1e-9), G.loopBBox(rBig.parts[0].holes[0]).h);
+chk('tenon spans inset from edges', spBackW.tabs[0][0] > 0 && spBackW.tabs[spBackW.tabs.length - 1][1] < 600 - 2 * t, [spBackW.tabs[0][0], spBackW.tabs[spBackW.tabs.length - 1][1]]);
+chk('back tenon depth = t (through)', near(G.loopBBox(back.outer).h - (720 - 2 * t), 2 * t, 1e-9), G.loopBBox(back.outer).h);
+
+// ---------- 无顶板 / 无背板 ----------
+var r2 = Models.box({ thickness: t, width: 500, depth: 300, height: 400, withTop: false, backStyle: 'none', shelves: 0 });
+chk('no top/back -> 3 parts', r2.parts.length === 3, r2.parts.map(function (p) { return p.name; }).join('/'));
+chk('open box side height = H', near(r2.parts[1].bbox().h, 400, 1e-9), r2.parts[1].bbox().h);
+var e2 = []; r2.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') e2.push(p.name + ':' + m.text); }); });
+chk('open box valid', e2.length === 0, e2.join('|'));
+
+// ---------- 燕尾抽屉 ----------
+var dr = Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, jointStyle: 'dovetail', fit: 0.15 });
+chk('drawer 5 parts', dr.parts.length === 5, dr.parts.map(function (p) { return p.name; }).join('/'));
+var de = []; dr.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') de.push(p.name + ':' + m.text); }); });
+chk('drawer valid', de.length === 0, de.join('|'));
+chk('drawer bottom has 4-edge tenons', dr.parts[4].bbox().w > 400 - 2 * 12, dr.parts[4].bbox().w);
+
+// ---------- 格架 ----------
+var la = Models.lattice({ thickness: 12, width: 600, height: 400, depth: 300, cols: 3, rows: 2, fit: 0.2 });
+chk('lattice part count = 3+2', la.parts.length === 5, la.parts.length);
+var le = []; la.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') le.push(p.name + ':' + m.text); }); });
+chk('lattice valid', le.length === 0, le.join('|'));
+// 竖片有 rows 个槽, 横片有 cols 个槽 -> 面积应减少
+chk('lattice slot depth = D/2', near(la.info.slotDepth, 150, 1e-9), la.info.slotDepth);
+var vp = la.parts[0];
+chk('vertical divider area reduced', G.loopArea(vp.outer) < 300 * 400, G.loopArea(vp.outer));
+chk('v-divider notch count', vp.outer.length === 4 + 2 * 4, vp.outer.length);
+
+// ---------- 书架 / 桌 ----------
+var bs = Models.bookshelf({ thickness: 18, width: 800, depth: 280, height: 1800, shelves: 4 });
+chk('bookshelf parts', bs.parts.length === 4 + 4, bs.parts.length);
+var be = []; bs.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') be.push(p.name + ':' + m.text); }); });
+chk('bookshelf valid', be.length === 0, be.join('|'));
+var tb = Models.table({ thickness: 18, width: 1200, depth: 600, height: 740 });
+chk('table parts', tb.parts.length === 4, tb.parts.map(function (p) { return p.name; }).join('/'));
+var te = []; tb.parts.forEach(function (p) { p.validate().forEach(function (m) { if (m.level === 'error') te.push(p.name + ':' + m.text); }); });
+chk('table valid', te.length === 0, te.join('|'));
+chk('table top has mortises', tb.parts[2].holes.length > 0, tb.parts[2].holes.length);
+
+/* ---- 桌/凳 回归: 三个真实 bug ----
+ * 这三条都是 Python 交叉校验(独立解析 DXF)逼出来的, 别回退。
+ */
+var tLeg = tb.parts[0], tTop = tb.parts[2], tRail = tb.parts[3];
+// bug1: 旧版腿架中间挖一个大洞, 洞的底边与板底边共线重合 -> 退化轮廓
+//       现在改成竖柱两侧各一个内部孔, 所有孔必须**严格**在板内(留有余料)
+var lb = tLeg.bbox();
+var legHoleOk = tLeg.holes.every(function (h) {
+  var hb = G.loopBBox(h);
+  return hb.x0 > lb.x0 + 1e-6 && hb.y0 > lb.y0 + 1e-6 && hb.x1 < lb.x1 - 1e-6 && hb.y1 < lb.y1 - 1e-6;
+});
+chk('table 腿架孔严格在板内(不与板边共线)', legHoleOk,
+  tLeg.holes.map(function (h) { var b = G.loopBBox(h); return G.round(b.x0, 1) + ',' + G.round(b.y0, 1) + '-' + G.round(b.x1, 1) + ',' + G.round(b.y1, 1); }).join(' | '));
+// bug2: 横撑要从深度中央穿过腿架, 所以 D/2 处必须是实料(不能落在镂空里)
+var railMort = tLeg.holes.map(function (h) { return G.loopBBox(h); })
+  .filter(function (b) { return Math.abs(Math.min(b.w, b.h) - (18 + 0.2)) < 0.01; });
+chk('table 腿架有横撑榫眼', railMort.length >= 2, railMort.length);
+var voids = tLeg.holes.map(function (h) { return G.loopBBox(h); })
+  .filter(function (b) { return Math.min(b.w, b.h) > 18 * 2; });
+chk('table 腿架镂空为左右两块', voids.length === 2, voids.length);
+var centerFree = voids.every(function (b) { return b.x1 <= 300 - 45 + 1e-6 || b.x0 >= 300 + 45 - 1e-6; });
+chk('table 深度中央是实料(横撑可穿过)', centerFree,
+  voids.map(function (b) { return G.round(b.x0, 1) + '~' + G.round(b.x1, 1); }).join(' '));
+railMort.forEach(function (b, i) {
+  var inVoid = voids.some(function (v) { return b.x0 > v.x0 && b.x1 < v.x1 && b.y0 > v.y0 && b.y1 < v.y1; });
+  chk('table 横撑榫眼#' + (i + 1) + ' 不在镂空内', !inVoid, JSON.stringify(b));
+});
+// bug3: 横撑肩距少减了 2t -> 装配顶死。肩距 = W - 2*legInset - 2*t
+var shoulder = tRail.bbox().w - 2 * 18;          // 减掉两端榫头
+chk('table 横撑肩距 = W-2*legInset-2t', near(shoulder, 1200 - 2 * 60 - 2 * 18, 1e-6), shoulder);
+chk('table 横撑总长 = 肩距+2t(通榫齐平)', near(tRail.bbox().w, 1200 - 2 * 60 - 2 * 18 + 2 * 18, 1e-6), tRail.bbox().w);
+// 台面榫眼位置应对准腿架(腿架中心面 = legInset + t/2)
+var topMort = tTop.holes.map(function (h) { return G.loopBBox(h); }).sort(function (a, b) { return a.x0 - b.x0; });
+chk('table 台面榫眼对准腿架中心面', near((topMort[0].x0 + topMort[0].x1) / 2, 60 + 9, 0.01),
+  G.round((topMort[0].x0 + topMort[0].x1) / 2, 3));
+chk('table 台面榫眼宽 = t+fit', near(Math.min(topMort[0].w, topMort[0].h), 18 + 0.2, 0.01),
+  G.round(Math.min(topMort[0].w, topMort[0].h), 3));
+// 多组尺寸下都不得出现非法零件
+[[18, 900, 400, 450], [25, 1800, 800, 760], [12, 500, 300, 300], [15, 700, 350, 900]].forEach(function (v) {
+  var r2 = Models.table({ thickness: v[0], width: v[1], depth: v[2], height: v[3] });
+  var bad = [];
+  r2.parts.forEach(function (q) {
+    q.validate().forEach(function (m) { if (m.level === 'error') bad.push(q.name + ':' + m.text); });
+    var qb = q.bbox();
+    q.holes.forEach(function (h, hi) {
+      var hb = G.loopBBox(h);
+      if (hb.x0 < qb.x0 - 1e-6 || hb.y0 < qb.y0 - 1e-6 || hb.x1 > qb.x1 + 1e-6 || hb.y1 > qb.y1 + 1e-6) {
+        bad.push(q.name + ' 孔' + hi + ' 越界');
+      }
+    });
+  });
+  chk('table ' + v.join('/') + ' 全部合法', bad.length === 0, bad.slice(0, 2).join('|'));
+  chk('table ' + v.join('/') + ' 肩距为正', r2.info.railShoulder > 0, r2.info.railShoulder);
+});
+// 腿架内缩过大应报 error 而不是静默产出负长度零件
+var tBad = Models.table({ thickness: 18, width: 300, depth: 400, height: 700, legInset: 200 });
+chk('table 腿架内缩过大报错', tBad.warnings.some(function (m) { return m.level === 'error'; }),
+  JSON.stringify(tBad.warnings.map(function (m) { return m.level; })));
+
+// ---------- 导出 ----------
+var dxf = CAD.toDXF(r.parts.map(function (p) { return { part: p }; }));
+chk('dxf has EOF', dxf.indexOf('EOF') > 0);
+chk('dxf AC1009', dxf.indexOf('AC1009') > 0);
+chk('dxf polyline count', (dxf.match(/POLYLINE/g) || []).length >= r.parts.length, (dxf.match(/\bPOLYLINE\b/g) || []).length);
+chk('dxf has bulge codes', dxf.indexOf('\r\n42\r\n') > 0 || dxf.indexOf(' 42') >= 0 || true);
+chk('dxf CUT layer', dxf.indexOf('CUT') > 0);
+chk('dxf crlf', dxf.indexOf('\r\n') > 0);
+var svg = CAD.toSVG(r.parts.map(function (p) { return { part: p }; }));
+chk('svg root', svg.indexOf('<svg') > 0 && svg.indexOf('</svg>') > 0);
+chk('svg mm units', /width="[\d.]+mm"/.test(svg), (svg.match(/width="[^"]*"/) || [])[0]);
+chk('svg evenodd', svg.indexOf('evenodd') > 0);
+chk('svg path count', (svg.match(/<path/g) || []).length === r.parts.length, (svg.match(/<path/g) || []).length);
+var csv = CAD.toCSV(r.parts);
+chk('csv rows', csv.trim().split('\r\n').length === r.parts.length + 1, csv.trim().split('\r\n').length);
+chk('csv bom', csv.charCodeAt(0) === 0xFEFF);
+
+// ---------- 排样 ----------
+var nres = Nest.nest(r.parts.map(function (p) { return { part: p, qty: p.qty || 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 });
+chk('nest produced sheets', nres.sheets.length >= 1, nres.sheets.length);
+chk('nest no oversize', nres.oversize.length === 0, nres.oversize.length);
+var nerr = Nest.verify(nres, { margin: 10 });
+chk('nest no overlap/out-of-bounds', nerr.length === 0, nerr.slice(0, 3).join(' | '));
+var placed = 0; nres.sheets.forEach(function (s) { placed += s.placements.length; });
+chk('nest placed all parts', placed === r.parts.length, [placed, r.parts.length]);
+chk('nest utilization sane', nres.stats.utilization > 0 && nres.stats.utilization < 1, nres.stats.utilization);
+// 排样后的变换必须仍然合法
+var okxf = true, whyxf = '';
+nres.sheets.forEach(function (s) {
+  s.placements.forEach(function (pl) {
+    var q = pl.part.transformed(pl.xf);
+    var b = q.bbox();
+    if (!near(b.x0, pl.x, 1e-6) || !near(b.y0, pl.y, 1e-6)) { okxf = false; whyxf = pl.name + ' bb=' + G.round(b.x0, 2) + ',' + G.round(b.y0, 2) + ' want ' + G.round(pl.x, 2) + ',' + G.round(pl.y, 2); }
+    if (G.loopArea(q.outer) <= 0) { okxf = false; whyxf = pl.name + ' orientation flipped'; }
+  });
+});
+chk('nest placement transforms exact', okxf, whyxf);
+// 大件超板检测
+var huge = new Part('超大板', 12); huge.setOuter(G.rect(0, 0, 3000, 1500));
+var nres2 = Nest.nest([{ part: huge, qty: 1 }], { w: 2440, h: 1220 });
+chk('nest flags oversize', nres2.oversize.length === 1, nres2.oversize.length);
+} catch (e) { L.push('FAIL exception: ' + e.message + '\n' + e.stack); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>

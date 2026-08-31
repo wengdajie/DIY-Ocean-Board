@@ -1,0 +1,143 @@
+<!doctype html><meta charset="utf-8"><body><pre id="out">x</pre>
+<script src="../js/geom.js"></script><script src="../js/joints.js"></script>
+<script src="../js/part.js"></script><script src="../js/models.js"></script>
+<script src="../js/imagetrace.js"></script><script src="../js/imagemodel.js"></script>
+<script src="../js/features.js"></script><script src="../js/custom.js"></script>
+<script src="../js/cutlist.js"></script><script src="../js/nest.js"></script>
+<script>
+// 导出多种模型的 DXF/SVG 供 Python 独立校验
+var out = {};
+function mkimg(w, h, draw) {
+  var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  var g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#000'; draw(g);
+  return g.getImageData(0, 0, w, h);
+}
+function emit(key, r) {
+  var items = r.parts.map(function (p) { return { part: p }; });
+  out[key] = {
+    dxf: CAD.toDXF(items, { kerf: 0 }),
+    dxfKerf: CAD.toDXF(items, { kerf: 0.4 }),
+    svg: CAD.toSVG(items, {}),
+    csv: CAD.toCSV(r.parts),
+    expect: r.parts.map(function (p) {
+      var b = p.bbox();
+      return {
+        name: p.name, w: G.round(b.w, 3), h: G.round(b.h, 3), holes: p.holes.length,
+        loops: 1 + p.holes.length, area: G.round(Math.abs(p.area()), 2),
+        x0: G.round(b.x0, 3), y0: G.round(b.y0, 3),
+        qty: p.qty || 1,
+        thickness: p.thickness,
+        grain: (p.meta && p.meta.grain) || 'any',
+        pockets: p.pockets.length,
+        pocketDepths: p.pockets.map(function (pk) { return G.round(pk.depth, 3); }),
+        pocketAreas: p.pockets.map(function (pk) { return G.round(Math.abs(G.loopArea(pk.loop)), 3); }),
+        cutLength: G.round(p.cutLength(), 2),
+        note: (p.meta && p.meta.note) || ''
+      };
+    })
+  };
+}
+[['box',{thickness:15,width:600,depth:320,height:720,fit:0.2,shelves:2}],
+ ['drawer',{thickness:12,width:400,depth:300,height:120,jointStyle:'dovetail',fit:0.15}],
+ ['lattice',{thickness:12,width:600,depth:300,height:400,cols:3,rows:2}],
+ ['table',{thickness:18,width:1200,depth:600,height:740}],
+ ['bookshelf',{thickness:18,width:800,depth:280,height:1800,shelves:4}]
+].forEach(function(cfg){ emit(cfg[0], Models[cfg[0]](cfg[1])); });
+
+/* ---- 自定义结构 ---- */
+emit('custom', Custom.shelfUnit({
+  thickness: 15, width: 900, depth: 320, height: 900,
+  dividers: [300, 600], shelvesPerBay: [2, 1, 3], fit: 0.2
+}));
+
+/* ---- 图片: 轮廓件 + 底座（带孔 + 圆弧底座 + 榫眼） ---- */
+var house = mkimg(320, 300, function (g) {
+  g.beginPath(); g.moveTo(160, 20); g.lineTo(300, 130); g.lineTo(20, 130); g.closePath(); g.fill();
+  g.fillRect(50, 130, 220, 140);
+  g.fillStyle = '#fff'; g.fillRect(85, 165, 55, 55); g.fillRect(180, 165, 55, 55);
+  g.fillStyle = '#000'; g.fillRect(140, 245, 40, 25);
+});
+emit('imgSilhouette', ImageModel.silhouette(house, {
+  thickness: 12, targetHeight: 300, fit: 0.2, standStyle: 'tenon', tenonWidth: 30, baseDepth: 90
+}));
+
+/* ---- 图片: 等高分层（圆形台阶 + 销孔，验证圆弧 bulge 的导出） ---- */
+var ramp = mkimg(240, 240, function (g) {
+  [['#d0d0d0', 100], ['#909090', 70], ['#404040', 40], ['#000000', 18]].forEach(function (lv) {
+    g.fillStyle = lv[0]; g.beginPath(); g.arc(120, 120, lv[1], 0, 7); g.fill();
+  });
+});
+emit('imgLayers', ImageModel.layers(ramp, {
+  thickness: 9, layerCount: 4, targetWidth: 200, pinDia: 6, fit: 0.2
+}));
+
+/* ---- 清单模式: pocket + 洞洞板 + 四角 + 边缺口 + 三类孔 + 纹理 + 数量 ---- */
+emit('cutlist', Cutlist.build({
+  thickness: 15, fit: 0.2,
+  rows: [
+    { name: '洞洞板', len: 760, wid: 560, qty: 1, grain: 'long',
+      corners: { all: { type: 'round', size: 20 } },
+      pegboard: { dia: 12, pitch: 40, margin: 30 } },
+    { name: '带槽面板', len: 600, wid: 400, qty: 2, grain: 'cross',
+      corners: { bl: { type: 'notch', size: 30 }, tr: { type: 'chamfer', size: 25 } },
+      pockets: [{ ref: 'center', x: 0, y: 0, w: 300, h: 120, depth: 6 },
+                { ref: 'bl', x: 80, y: 60, w: 60, h: 60, depth: 4, r: 10 }] },
+    { name: '多孔件', len: 500, wid: 300, qty: 3, grain: 'any',
+      holes: [{ type: 'circle', d: 20, x: 60, y: 60 },
+              { type: 'rect', ref: 'center', x: 0, y: 0, w: 120, h: 40, r: 8 },
+              { type: 'slot', ref: 'tr', x: -80, y: -60, len: 90, d: 14, ang: 30 }] },
+    { name: '边缺口件', len: 700, wid: 350, qty: 1, grain: 'long',
+      notches: [{ edge: 'bottom', at: 120, len: 60, depth: 30 },
+                { edge: 'top', at: 200, len: 80, depth: 25 },
+                { edge: 'left', at: 100, len: 50, depth: 20 }] }
+  ]
+}));
+
+/* ---- 配方: L 形转角柜(边 profile 排序回归) ---- */
+emit('recipeCorner', Custom.recipeUnit('corner', {
+  thickness: 15, width: 900, depth: 320, height: 900, fit: 0.2,
+  legX: 900, legY: 700, shelves: 2
+}));
+
+/* ---- 配方: 井字酒格(十字半槽搭接) ---- */
+emit('recipeWinerack', Custom.recipeUnit('winerack', {
+  thickness: 15, width: 600, depth: 300, height: 400, fit: 0.2, cols: 3, rows: 2
+}));
+
+/* ---- 配方: 洞洞板挂墙组(阵列孔 + 榫接混合) ---- */
+emit('recipePegwall', Custom.recipeUnit('pegwall', {
+  thickness: 15, width: 800, depth: 300, height: 600, fit: 0.2,
+  pegDia: 12, pegPitch: 40, pegMargin: 40
+}));
+
+/* ---- item3 新增的 5 个配方也要过一遗 Python 外部校核 ----
+ * 家具类型并入配方后一共 16 种, 其中 11 种是 panels 型。
+ * 外部校核不跑 JS, 是拿 Python 重算 bulge 弧、面积、包围盒、CSV,
+ * 所以这里多盖一个配方 = 多一份"两套独立实现算出同一结果"的证据。 */
+emit('recipeCube', Custom.recipeUnit('cube', {
+  thickness: 15, width: 900, depth: 300, height: 900, fit: 0.2, cols: 3, rows: 3
+}));
+emit('recipeTvstand', Custom.recipeUnit('tvstand', {
+  thickness: 18, width: 1400, depth: 400, height: 450, fit: 0.2, bays: 3, shelves: 1
+}));
+emit('recipeShoerack', Custom.recipeUnit('shoerack', {
+  thickness: 15, width: 800, depth: 300, height: 900, fit: 0.2, tiers: 4, backStyle: 'tenon'
+}));
+emit('recipeNightstand', Custom.recipeUnit('nightstand', {
+  thickness: 15, width: 450, depth: 380, height: 520, fit: 0.2, shelves: 1
+}));
+/* 长凳是带弧样式的典型宿主 —— mirrorProf 那个 bulge 归属缺陷
+ * 当时就是在 bench + fillet 上量出来的。拿 Python 独立重算弧面积/包围盒,
+ * 正好把这类"不报错只是弧切错"的隐病钉死。 */
+emit('recipeBench', Custom.recipeUnit('bench', {
+  thickness: 18, width: 1200, depth: 350, height: 450, fit: 0.2,
+  jointStyle: 'fillet', tipRadius: 5
+}));
+emit('recipeBenchFinger', Custom.recipeUnit('bench', {
+  thickness: 18, width: 1200, depth: 350, height: 450, fit: 0.2, jointStyle: 'finger'
+}));
+
+document.getElementById('out').textContent = JSON.stringify(out);
+</script>

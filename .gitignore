@@ -1,0 +1,17 @@
+# 临时探针 / 调试脚本（开发过程产物，不入仓）
+_*
+*.log
+
+# Windows / 编辑器
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 注意: tools/dump.json 是**入仓的** —— 它是外部交叉校验的基准快照，
+# 没它 verify_exports.py 跑不起来（而重生成它需要本地有 Chrome）。

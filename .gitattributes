@@ -1,0 +1,12 @@
+# 行尾统一成 LF 入仓。
+#
+# 为什么需要: 本地是 Windows, git 默认会把 LF 换成 CRLF 再写回工作区,
+# 而 tools/verify_exports.py / tools/dump.json 是逐字符比对导出文本的基线快照。
+# 若一份在 Windows 下是 CRLF、到 CI(Linux) 下是 LF, 就会凭空多出差异。
+# 锁成 LF 后, 本地与 CI 看到的字节完全一致。
+* text=auto eol=lf
+
+# 导出的 zip 包不需要开发文件
+.github/    export-ignore
+app/tests/  export-ignore
+tools/      export-ignore

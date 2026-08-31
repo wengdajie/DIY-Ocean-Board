@@ -1,0 +1,1584 @@
+<!doctype html><meta charset="utf-8"><title>e2e</title>
+<body style="margin:0">
+<iframe id="fr" src="../index.html" style="width:1500px;height:950px;border:0"></iframe>
+<pre id="out">running</pre>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function done() {
+  var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+  document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+  document.title = 'DONE fails=' + fails;
+}
+window.onload = function () {
+  setTimeout(function () {
+    var w = document.getElementById('fr').contentWindow;
+    var d = w.document;
+    /* 导出一节必须异步(File System Access API 全是 Promise),
+     * 所以把尾巴挂在 tail 上, 等它 settle 完再 done()。
+     * 否则 done() 会在导出断言还没跑完时就把总数写出去。 */
+    var tail = Promise.resolve();
+    try {
+      // 库都加载
+      chk('G loaded', !!w.G);
+      chk('J loaded', !!w.J);
+      chk('Models loaded', !!w.Models);
+      chk('CAD loaded', !!w.CAD);
+      chk('Nest loaded', !!w.Nest);
+      chk('Render loaded', !!w.Render);
+      chk('app booted', !!w.__app);
+      // 启动自检
+      chk('built-in selfTest no fail', w.__selfTest && w.__selfTest.fail === 0, JSON.stringify(w.__selfTest));
+      chk('selfTest badge', /自检 \d+\/\d+/.test(d.getElementById('selfTest').textContent), d.getElementById('selfTest').textContent);
+      // 默认生成
+      var st = w.__app.state;
+      /* 【第 9 轮改架】家具类型已并入结构配方, 顶部只剩两个真模式:
+       * custom(结构配方/板位表/零件清单) 与 image(图片生成)。
+       * 默认落在 custom + 配方 box, 效果等价于旧版的"默认箱体柜"。 */
+      chk('default model custom', st.model === 'custom', st.model);
+      chk('default recipe box', st.recipe === 'box', st.recipe);
+      chk('default cmode recipe', st.cmode === 'recipe', st.cmode);
+      chk('result parts > 0', st.result && st.result.parts.length > 0, st.result ? st.result.parts.length : 0);
+      chk('nest done', !!st.nest && st.nest.sheets.length >= 1, st.nest ? st.nest.sheets.length : 0);
+      // 无 error 级提示
+      var errs = d.querySelectorAll('#msgs .msg.error');
+      chk('no error messages', errs.length === 0, Array.prototype.map.call(errs, function (e) { return e.textContent; }).join(' | '));
+      // 统计栏
+      chk('stat filled', d.getElementById('stat').textContent.indexOf('零件') >= 0, d.getElementById('stat').textContent.slice(0, 90));
+      /* 排样质量的三个新指标必须上屏: 紧凑度 / 最大剩料 / 获胜策略 */
+      var statTxt = d.getElementById('stat').textContent;
+      chk('stat 显示紧凑度', /紧凑度\s*[\d.]+%/.test(statTxt), statTxt.slice(0, 200));
+      chk('stat 显示最大剩料', /最大剩料\s*[\d.]+×[\d.]+mm/.test(statTxt), statTxt.slice(0, 200));
+      chk('stat 显示获胜策略与比选数', /策略\s*\S+（比选 \d+ 方案）/.test(statTxt), statTxt.slice(0, 260));
+      chk('排样统计带策略名', !!st.nest.stats.strategy && w.Nest.strategies().indexOf(st.nest.stats.strategy) >= 0, st.nest.stats.strategy);
+      chk('默认跑满 25 个方案', st.nest.stats.strategiesTried === 25, st.nest.stats.strategiesTried);
+      chk('紧凑度 >= 利用率', st.nest.stats.packDensity >= st.nest.stats.utilization - 1e-9,
+        st.nest.stats.packDensity + ' / ' + st.nest.stats.utilization);
+      /* 统计条是 flex-wrap 的: 条目一多就换行变高, 会把下方画布往下推。
+       * 这里盯住“统计条不得涨到把主视图挤没”, 否则以后再加指标时
+       * 会静静地把三视图/排样图压成一条缝。 */
+      var statH = d.getElementById('stat').getBoundingClientRect().height;
+      chk('统计条高度不失控(<=两行)', statH <= 76, statH);
+      // 料单表
+      chk('list rows', d.querySelectorAll('#listPane tbody tr').length === st.result.parts.length, d.querySelectorAll('#listPane tbody tr').length);
+      // canvas 真的画了东西
+      function painted(id) {
+        var cv = d.getElementById(id);
+        if (!cv || !cv.width) return -1;
+        var g = cv.getContext('2d');
+        var px = g.getImageData(0, 0, cv.width, cv.height).data;
+        var n = 0;
+        for (var i = 3; i < px.length; i += 4 * 37) if (px[i] > 0) n++;
+        return n;
+      }
+      chk('nest canvas painted', painted('cvNest') > 50, painted('cvNest'));
+      /* 排样策略下拉真的接入了 sheetOpts + 改完会重算 */
+      (function () {
+        var selEl = d.getElementById('nestStrategy');
+        chk('排样策略下拉存在', !!selEl && selEl.options.length >= 5, selEl ? selEl.options.length : 'none');
+        chk('默认为自动比选', selEl.value === 'auto', selEl.value);
+        chk('sheetOpts 带上了 strategy', w.__app.sheetOpts().strategy === 'auto', w.__app.sheetOpts().strategy);
+        var before = w.__app.state.nest.stats.strategy;
+        selEl.value = 'maxside/shelf';
+        selEl.dispatchEvent(new w.Event('change'));
+        var after = w.__app.state.nest.stats;
+        chk('指定货架式后只跑 1 个方案', after.strategiesTried === 1, after.strategiesTried);
+        chk('指定策略后报告的就是它', after.strategy === 'maxside/shelf', after.strategy);
+        chk('指定策略后排样仍合法', w.Nest.verify(w.__app.state.nest, w.__app.sheetOpts()).length === 0);
+        /* 比选不得差于单一策略 —— 这是“最大利用率”在 UI 层的兑现 */
+        selEl.value = 'auto';
+        selEl.dispatchEvent(new w.Event('change'));
+        var auto = w.__app.state.nest.stats;
+        chk('自动比选板数 <= 货架式板数', auto.sheetCount <= after.sheetCount, auto.sheetCount + ' vs ' + after.sheetCount);
+        chk('自动比选紧凑度 >= 货架式', auto.packDensity >= after.packDensity - 1e-9,
+          auto.packDensity.toFixed(4) + ' vs ' + after.packDensity.toFixed(4));
+        chk('回到自动后又跑满 25 方案', auto.strategiesTried === 25, auto.strategiesTried);
+      })();
+      // 切到零件页/3D 页
+      d.querySelector('.tab[data-pane="parts"]').click();
+      chk('parts canvas painted', painted('cvParts') > 50, painted('cvParts'));
+      d.querySelector('.tab[data-pane="asm"]').click();
+      chk('asm canvas painted', painted('cvAsm') > 50, painted('cvAsm'));
+      d.querySelector('.tab[data-pane="nest"]').click();
+
+      // 遍历所有模型: 不得报错, 零件必须合法
+      /* 旧的五个家具类型名现在是配方 key。selectModel 保留了向后兼容:
+       * 传这些名字进去 = 切到配方模式 + 选中该配方 + 套用推荐尺寸。
+       * 这条路径必须保住: 导入旧参数 JSON 也走它。 */
+      var models = ['box', 'bookshelf', 'drawer', 'lattice', 'table'];
+      models.forEach(function (m) {
+        w.__app.selectModel(m);
+        chk('model ' + m + ' -> recipe 模式', w.__app.state.model === 'custom' &&
+          w.__app.state.cmode === 'recipe' && w.__app.state.recipe === m,
+          w.__app.state.model + '/' + w.__app.state.cmode + '/' + w.__app.state.recipe);
+        var s = w.__app.state;
+        var bad = [];
+        s.result.parts.forEach(function (p) {
+          p.validate().forEach(function (x) { if (x.level === 'error') bad.push(p.name + ':' + x.text); });
+        });
+        chk('model ' + m + ' parts valid', bad.length === 0 && s.result.parts.length > 0,
+          bad.length ? bad.slice(0, 2).join('|') : ('n=' + s.result.parts.length));
+        var ne = w.Nest.verify(s.nest, w.__app.sheetOpts());
+        chk('model ' + m + ' nest clean', ne.length === 0 && s.nest.oversize.length === 0,
+          ne.slice(0, 2).join('|') + ' oversize=' + s.nest.oversize.length);
+        var msgErr = d.querySelectorAll('#msgs .msg.error');
+        chk('model ' + m + ' no UI error', msgErr.length === 0,
+          Array.prototype.map.call(msgErr, function (e) { return e.textContent; }).slice(0, 2).join('|'));
+        // 导出必须可用
+        var dxf = w.CAD.toDXF(w.__app.nestItems(), { kerf: 0 });
+        chk('model ' + m + ' dxf ok', dxf.indexOf('EOF') > 0 && dxf.length > 2000, dxf.length);
+        var svg = w.CAD.toSVG(w.__app.partItems(), {});
+        chk('model ' + m + ' svg ok', svg.indexOf('</svg>') > 0 && /NaN|undefined/.test(svg) === false, svg.length + (/NaN/.test(svg) ? ' HAS-NaN' : ''));
+        var csv = w.CAD.toCSV(s.result.parts);
+        chk('model ' + m + ' csv ok', csv.split('\r\n').length >= s.result.parts.length + 1);
+      });
+
+      // 燕尾 + CNC 让位组合
+      w.__app.selectModel('drawer');
+      d.getElementById('jointStyle').value = 'dovetail';
+      d.getElementById('jointStyle').dispatchEvent(new w.Event('change'));
+      d.getElementById('machine').value = 'cnc';
+      d.getElementById('machine').dispatchEvent(new w.Event('change'));
+      var s2 = w.__app.state;
+      var bad2 = [];
+      s2.result.parts.forEach(function (p) { p.validate().forEach(function (x) { if (x.level === 'error') bad2.push(p.name + ':' + x.text); }); });
+      chk('dovetail+cnc valid', bad2.length === 0, bad2.slice(0, 3).join('|'));
+      chk('dovetail+cnc dxf', w.CAD.toDXF(w.__app.nestItems(), { kerf: 0.15 }).indexOf('EOF') > 0);
+      chk('cnc shows tool row', d.getElementById('toolRow').style.display !== 'none');
+      chk('dovetail shows angle row', d.getElementById('dtRow').style.display !== 'none');
+
+      /* ---- 自定义 CNC 刀具直径（第 8 轮）---- */
+      chk('cnc shows tool chips + hint',
+        d.getElementById('toolChipRow').style.display !== 'none' &&
+        d.getElementById('toolHint').style.display !== 'none');
+      /* dogbone 是圆, 没有"耳长"这回事 -> 该行必须藏起来 */
+      chk('dogbone hides ear-length row', d.getElementById('earRow').style.display === 'none');
+      d.getElementById('reliefType').value = 'tbone';
+      d.getElementById('reliefType').dispatchEvent(new w.Event('change'));
+      chk('tbone shows ear-length row',
+        d.getElementById('earRow').style.display !== 'none' &&
+        d.getElementById('earHint').style.display !== 'none');
+      // chip 点一下就要填进输入框, 并且高亮跟上
+      var tc = Array.prototype.filter.call(d.querySelectorAll('#toolChips .chip'), function (x) { return x.dataset.d === '6.35'; })[0];
+      chk('tool chips present (6.35 = 1/4 inch)', !!tc);
+      tc.click();
+      chk('tool chip fills input', +d.getElementById('toolDia').value === 6.35, d.getElementById('toolDia').value);
+      chk('tool chip highlights', tc.classList.contains('on'));
+      chk('tool hint states relief radius', /让位半径 = 3\.175/.test(d.getElementById('toolHint').textContent),
+        d.getElementById('toolHint').textContent.slice(0, 60));
+      // 刀径必须真的改变几何: 6.35 的让位量应显著大于 3.175
+      function reliefArea() {
+        return w.__app.state.result.parts.reduce(function (a, p) { return a + Math.abs(p.area()); }, 0);
+      }
+      var aBig = reliefArea();
+      d.getElementById('toolDia').value = 3.175;
+      d.getElementById('toolDia').dispatchEvent(new w.Event('change'));
+      var aSmall = reliefArea();
+      chk('bigger tool removes more material (让位真的生效)', aBig < aSmall - 1,
+        '6.35mm -> ' + Math.round(aBig) + 'mm² vs 3.175mm -> ' + Math.round(aSmall) + 'mm²');
+      // 耳长也必须真的生效(2r -> 3r 会多牺牲料)
+      d.getElementById('earLen').value = 3;
+      d.getElementById('earLen').dispatchEvent(new w.Event('change'));
+      var aEar3 = reliefArea();
+      d.getElementById('earLen').value = 2;
+      d.getElementById('earLen').dispatchEvent(new w.Event('change'));
+      var aEar2 = reliefArea();
+      chk('longer ear removes more material (耳长参数真的生效)', aEar3 < aEar2 - 0.5,
+        '3r -> ' + Math.round(aEar3) + ' vs 2r -> ' + Math.round(aEar2));
+      // 荒谬刀径要夹住并明说, 而不是切出废图
+      d.getElementById('toolDia').value = 999;
+      d.getElementById('toolDia').dispatchEvent(new w.Event('change'));
+      chk('absurd tool dia clamped with warning',
+        /已按 25mm 计算/.test(d.getElementById('toolHint').textContent) &&
+        d.getElementById('toolHint').className.indexOf('warnHint') >= 0,
+        d.getElementById('toolHint').textContent.slice(0, 50));
+      var badTool = [];
+      w.__app.state.result.parts.forEach(function (p) {
+        p.validate().forEach(function (x) { if (x.level === 'error') badTool.push(p.name + ':' + x.text); });
+      });
+      chk('absurd tool dia still yields valid parts', badTool.length === 0, badTool.slice(0, 2).join('|'));
+      d.getElementById('toolDia').value = 3.175;
+      d.getElementById('toolDia').dispatchEvent(new w.Event('change'));
+      d.getElementById('reliefType').value = 'dogbone';
+      d.getElementById('reliefType').dispatchEvent(new w.Event('change'));
+
+      // kerf 补偿真的改变了几何
+      var noK = w.CAD.toSVG(w.__app.partItems(), { kerf: 0 });
+      var wiK = w.CAD.toSVG(w.__app.partItems(), { kerf: 0.4 });
+      chk('kerf changes geometry', noK !== wiK && wiK.indexOf('NaN') < 0);
+
+      // 极端参数不崩
+      w.__app.selectModel('box');
+      [[150, 100, 150, 9], [3000, 800, 2400, 25], [200, 200, 200, 21]].forEach(function (v) {
+        d.getElementById('width').value = v[0];
+        d.getElementById('depth').value = v[1];
+        d.getElementById('height').value = v[2];
+        d.getElementById('thickness').value = v[3];
+        var ok = true, why = '';
+        try {
+          d.getElementById('width').dispatchEvent(new w.Event('change'));
+        } catch (e) { ok = false; why = e.message; }
+        chk('extreme ' + v.join('/') + ' no crash', ok && !!w.__app.state.result, why);
+      });
+
+      /* ================= 自定义结构 UI 端到端（重构版）================= */
+      /* 前面的用例把 machine 改成 cnc、jointStyle 改成 dovetail 了。
+       * 不复位的话 dogbone 让位会削掉内凹角的料, 精确面积断言必然失败
+       * —— 这是测试自身的状态泄漏, 必须显式清干净。 */
+      d.getElementById('machine').value = 'laser';
+      d.getElementById('machine').dispatchEvent(new w.Event('change'));
+      d.getElementById('jointStyle').value = 'finger';
+      d.getElementById('jointStyle').dispatchEvent(new w.Event('change'));
+      d.getElementById('kerf').value = 0;
+      d.getElementById('kerf').dispatchEvent(new w.Event('change'));
+      d.getElementById('realThickness').value = 0;
+      d.getElementById('realThickness').dispatchEvent(new w.Event('change'));
+      d.getElementById('thickness').value = 15;
+      d.getElementById('thickness').dispatchEvent(new w.Event('change'));
+      d.getElementById('fit').value = 0.2;
+      d.getElementById('fit').dispatchEvent(new w.Event('change'));
+      w.__app.selectModel('custom');
+      var sc = w.__app.state;
+      chk('custom chip active', d.querySelector('.chip[data-model="custom"]').classList.contains('on'));
+      chk('custom panel shown', d.getElementById('cusSec').style.display !== 'none');
+      chk('custom shows edit tab', d.getElementById('tabEdit').style.display !== 'none');
+      chk('custom auto opens editor', sc.pane === 'edit', sc.pane);
+      /* 【第 9 轮改架】自定义的默认子模式从"零件清单"改成"结构配方"。
+       * 理由: 家具类型 chip 没了之后, 配方就是唯一的"一键出成品"入口,
+       * 默认落在清单上会让新用户看到一堆无接合的散板。 */
+      chk('custom default cmode=recipe', sc.cmode === 'recipe', sc.cmode);
+      chk('配方模式露接合方式', d.getElementById('jsRow').style.display !== 'none');
+      chk('配方模式有接合', (sc.result.info.tenonJoints || 0) + (sc.result.info.lapJoints || 0) > 0,
+        JSON.stringify(sc.result.info).slice(0, 120));
+      /* 切到清单模式继续测清单那一整套。
+       * 接合方式在清单模式下必须隐 —— Cutlist.build 逐行独立下料,
+       * 行与行之间根本没有接合, 露出来就是骗人。 */
+      w.__app.setCmode('list');
+      chk('custom list mode hides joint style', d.getElementById('jsRow').style.display === 'none');
+      chk('custom cmode=list', sc.cmode === 'list', sc.cmode);
+      chk('custom default rows non-empty', sc.rows.length > 0, sc.rows.length);
+      chk('custom default parts', sc.result.parts.length === sc.rows.length, sc.result.parts.length + '/' + sc.rows.length);
+      chk('list mode hides overall dims', d.getElementById('dimSec').style.display === 'none');
+      function badOf(parts) {
+        var b = [];
+        parts.forEach(function (p) { p.validate().forEach(function (x) { if (x.level === 'error') b.push(p.name + ':' + x.text); }); });
+        return b;
+      }
+      chk('custom default valid', badOf(sc.result.parts).length === 0, badOf(sc.result.parts).slice(0, 3).join('|'));
+      chk('editor grid rendered', d.querySelectorAll('#editGrid tbody tr').length >= sc.rows.length,
+        d.querySelectorAll('#editGrid tbody tr').length);
+      chk('editor bar rendered', d.getElementById('editBar').textContent.indexOf('零件清单') >= 0,
+        d.getElementById('editBar').textContent.slice(0, 40));
+
+      /* ---- 清单: 加一行 / 改数字 / 数量 ---- */
+      var n0 = w.__app.state.rows.length;
+      d.getElementById('btnAddRow').click();
+      chk('add row', w.__app.state.rows.length === n0 + 1, w.__app.state.rows.length);
+      chk('add row -> new part', w.__app.state.result.parts.length === n0 + 1, w.__app.state.result.parts.length);
+      // 直接改活数据 + 触发重算(等价于在表格里输入)
+      var st2 = w.__app.state;
+      st2.rows[st2.rows.length - 1] = { name: '测试板', len: 800, wid: 400, qty: 3, grain: 'long' };
+      w.__app.generate();
+      var tp = w.__app.state.result.parts.filter(function (p) { return p.name === '测试板'; })[0];
+      chk('row edit applied', !!tp && Math.abs(tp.bbox().w - 800) < 1e-6 && Math.abs(tp.bbox().h - 400) < 1e-6,
+        tp ? w.G.round(tp.bbox().w, 1) + 'x' + w.G.round(tp.bbox().h, 1) : 'missing');
+      chk('row qty applied', tp && tp.qty === 3, tp && tp.qty);
+      chk('row grain applied', tp && tp.meta.grain === 'long', tp && tp.meta.grain);
+      // 纹理锁定 -> 排样必须不转 90
+      var placed = [];
+      w.__app.state.nest.sheets.forEach(function (sh) {
+        sh.placements.forEach(function (pl) { if (pl.part.name === '测试板') placed.push(pl.rot); });
+      });
+      chk('grain locks rotation', placed.length === 3 && placed.every(function (r) { return r === 0; }), placed.join(','));
+      chk('grain reported', w.__app.state.nest.grainForced.indexOf('测试板') >= 0,
+        (w.__app.state.nest.grainForced || []).join(','));
+      // 关掉纹理约束 -> 允许旋转(至少不再被 verify 拦)
+      d.getElementById('respectGrain').checked = false;
+      d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
+      chk('grain off no verify err', w.Nest.verify(w.__app.state.nest, w.__app.sheetOpts()).length === 0);
+      d.getElementById('respectGrain').checked = true;
+      d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
+
+      /* ---- 清单: 停用行 / 非法尺寸 ---- */
+      var nBefore = w.__app.state.result.parts.length;
+      st2.rows[st2.rows.length - 1].off = true;
+      w.__app.generate();
+      chk('row off excluded', w.__app.state.result.parts.length === nBefore - 1, w.__app.state.result.parts.length);
+      st2.rows[st2.rows.length - 1] = { name: '坏板', len: 0, wid: 200 };
+      w.__app.generate();
+      chk('bad size -> error msg', d.querySelectorAll('#msgs .msg.error').length > 0 &&
+        /长\/宽/.test(d.getElementById('msgs').textContent), d.getElementById('msgs').textContent.slice(0, 70));
+      chk('bad size no crash', !!w.__app.state.result);
+      st2.rows.pop();
+      w.__app.generate();
+
+      /* ---- 清单模板: 每个都要能出合法零件 ---- */
+      var tk = d.getElementById('tplKey');
+      chk('templates listed', tk.options.length >= 5, tk.options.length);
+      for (var ti2 = 0; ti2 < tk.options.length; ti2++) {
+        tk.value = tk.options[ti2].value;
+        d.getElementById('btnTpl').click();
+        var stT = w.__app.state;
+        var bt = badOf(stT.result.parts);
+        chk('template ' + tk.value + ' valid', stT.result.parts.length > 0 && bt.length === 0,
+          stT.result.parts.length + ' | ' + bt.slice(0, 2).join('|'));
+        chk('template ' + tk.value + ' nest ok',
+          w.Nest.verify(stT.nest, w.__app.sheetOpts()).length === 0 && stT.nest.oversize.length === 0,
+          'oversize=' + stT.nest.oversize.length);
+        chk('template ' + tk.value + ' dxf ok', w.CAD.toDXF(w.__app.nestItems()).indexOf('EOF') > 0);
+      }
+
+      /* ---- 洞洞板: 阵列孔真的生成了 ---- */
+      tk.value = 'pegboard';
+      d.getElementById('btnTpl').click();
+      var pegP = w.__app.state.result.parts[0];
+      chk('pegboard many holes', pegP.holes.length > 20, pegP.holes.length);
+      chk('pegboard holes valid', badOf([pegP]).length === 0, badOf([pegP]).slice(0, 2).join('|'));
+      chk('pegboard meta', pegP.meta.pegboard && pegP.meta.pegboard.count === pegP.holes.length,
+        JSON.stringify(pegP.meta.pegboard));
+      chk('pegboard note', /洞洞板/.test(pegP.meta.note), pegP.meta.note);
+      // 改孔距 -> 孔数变化
+      w.__app.state.rows[0].pegboard.pitch = 80;
+      w.__app.generate();
+      chk('pitch changes hole count', w.__app.state.result.parts[0].holes.length < pegP.holes.length,
+        w.__app.state.result.parts[0].holes.length + ' vs ' + pegP.holes.length);
+
+      /* ---- 定深铣槽: 独立图层 + 深度校验 ---- */
+      tk.value = 'drawerFront';
+      d.getElementById('btnTpl').click();
+      var pkP = w.__app.state.result.parts[0];
+      chk('pocket generated', pkP.pockets.length === 1, pkP.pockets.length);
+      chk('pocket depth < thickness', pkP.pockets[0].depth < pkP.thickness,
+        pkP.pockets[0].depth + '/' + pkP.thickness);
+      chk('pocket valid', badOf([pkP]).length === 0, badOf([pkP]).slice(0, 2).join('|'));
+      var pdxf = w.CAD.toDXF(w.__app.partItems());
+      chk('pocket on POCKET layer', pdxf.indexOf('POCKET') > 0);
+      chk('pocket not in净面积', Math.abs(Math.abs(pkP.area()) - w.G.loopArea(pkP.outer)) < 1e-6,
+        w.G.round(Math.abs(pkP.area()), 2) + ' vs ' + w.G.round(w.G.loopArea(pkP.outer), 2));
+      chk('pocket in cutLength', pkP.cutLength() > w.G.loopLength(pkP.outer));
+      // 深度改到 >= 板厚 -> 必须报 error 而不是默默切透
+      w.__app.state.rows[0].pockets[0].depth = 99;
+      w.__app.generate();
+      chk('pocket too deep -> error', /切透/.test(d.getElementById('msgs').textContent),
+        d.getElementById('msgs').textContent.slice(0, 80));
+      // 加工清单 CSV
+      tk.value = 'deskTop';
+      d.getElementById('btnTpl').click();
+      var fcsv = w.__app.featureCSV(w.__app.state.result.parts);
+      chk('featureCSV header', fcsv.indexOf('中心X(mm)') > 0);
+      chk('featureCSV has rows', fcsv.split('\r\n').length >= 3, fcsv.split('\r\n').length);
+      chk('featureCSV marks 不通', /不通/.test(fcsv));
+
+      /* ---- 四角处理: 三种类型都改变面积 ---- */
+      w.__app.state.rows = [{ name: '角板', len: 400, wid: 300, qty: 1 }];
+      w.__app.generate();
+      var aPlain = Math.abs(w.__app.state.result.parts[0].area());
+      chk('plain area = w*h', Math.abs(aPlain - 400 * 300) < 1e-6, w.G.round(aPlain, 2));
+      var areas = {};
+      ['round', 'chamfer', 'notch'].forEach(function (ty) {
+        w.__app.state.rows[0].corners = { all: { type: ty, size: 30 } };
+        w.__app.generate();
+        var pA = w.__app.state.result.parts[0];
+        areas[ty] = Math.abs(pA.area());
+        chk('corner ' + ty + ' reduces area', areas[ty] < aPlain - 1, w.G.round(areas[ty], 2));
+        chk('corner ' + ty + ' valid', badOf([pA]).length === 0, badOf([pA]).slice(0, 2).join('|'));
+      });
+      // notch 切得最多, round 最少 (4s² > 2s² > s²(4-π))
+      chk('corner area order notch<chamfer<round', areas.notch < areas.chamfer && areas.chamfer < areas.round,
+        [w.G.round(areas.notch, 1), w.G.round(areas.chamfer, 1), w.G.round(areas.round, 1)].join(' < '));
+      w.__app.state.rows[0].corners = null;
+
+      /* ---- 边部切口 + 冲突检测 ---- */
+      w.__app.state.rows[0].notches = [{ edge: 'bottom', at: 100, len: 80, depth: 40 }];
+      w.__app.generate();
+      var nP = w.__app.state.result.parts[0];
+      chk('notch reduces area', Math.abs(nP.area()) < aPlain - 1, w.G.round(Math.abs(nP.area()), 2));
+      chk('notch exact area', Math.abs(Math.abs(nP.area()) - (400 * 300 - 80 * 40)) < 1e-6,
+        w.G.round(Math.abs(nP.area()), 3) + ' vs ' + (400 * 300 - 80 * 40));
+      chk('notch valid', badOf([nP]).length === 0, badOf([nP]).slice(0, 2).join('|'));
+      // 同边重叠切口必须报 error
+      w.__app.state.rows[0].notches = [{ edge: 'bottom', at: 100, len: 80, depth: 40 },
+        { edge: 'bottom', at: 120, len: 80, depth: 40 }];
+      w.__app.generate();
+      chk('overlapping notches -> error', /重叠/.test(d.getElementById('msgs').textContent),
+        d.getElementById('msgs').textContent.slice(0, 80));
+      // 超出边范围
+      w.__app.state.rows[0].notches = [{ edge: 'bottom', at: 380, len: 80, depth: 40 }];
+      w.__app.generate();
+      chk('out-of-range notch -> error', /超出/.test(d.getElementById('msgs').textContent),
+        d.getElementById('msgs').textContent.slice(0, 80));
+      w.__app.state.rows[0].notches = [];
+
+      /* ---- 自定义孔: 三种类型 ---- */
+      w.__app.state.rows[0].holes = [
+        { type: 'circle', ref: 'bl', x: 60, y: 60, d: 20 },
+        { type: 'rect', ref: 'center', x: 0, y: 0, w: 80, h: 40, r: 5 },
+        { type: 'slot', ref: 'tr', x: -80, y: -50, len: 90, d: 25 }
+      ];
+      w.__app.generate();
+      var hP = w.__app.state.result.parts[0];
+      chk('3 hole types', hP.holes.length === 3, hP.holes.length);
+      chk('holes valid (in board, CW, no overlap)', badOf([hP]).length === 0, badOf([hP]).slice(0, 3).join('|'));
+      chk('circle hole area', (function () {
+        var b = w.G.loopBBox(hP.holes[0]);
+        return Math.abs((b.x1 - b.x0) - 20) < 1e-6 && Math.abs(w.G.loopArea(hP.holes[0]) + Math.PI * 100) < 1e-6;
+      })(), w.G.round(w.G.loopArea(hP.holes[0]), 3));
+      // ref 基准换算: tr 基准 x=-80 => 中心 x = 400-80 = 320
+      chk('ref=tr anchor', (function () {
+        var b = w.G.loopBBox(hP.holes[2]);
+        return Math.abs((b.x0 + b.x1) / 2 - 320) < 1e-6 && Math.abs((b.y0 + b.y1) / 2 - 250) < 1e-6;
+      })(), (function () { var b = w.G.loopBBox(hP.holes[2]); return w.G.round((b.x0 + b.x1) / 2, 1) + ',' + w.G.round((b.y0 + b.y1) / 2, 1); })());
+      // 孔跑到板外必须被拒
+      w.__app.state.rows[0].holes = [{ type: 'circle', ref: 'bl', x: 395, y: 295, d: 40 }];
+      w.__app.generate();
+      chk('out-of-board hole rejected', w.__app.state.result.parts[0].holes.length === 0 &&
+        d.querySelectorAll('#msgs .msg.error').length > 0, w.__app.state.result.parts[0].holes.length);
+      w.__app.state.rows[0].holes = [];
+
+      /* ================= 结构配方模式 ================= */
+      w.__app.setCmode('recipe');
+      chk('recipe section shown', d.getElementById('recipeSec').style.display !== 'none');
+      chk('recipe shows dims', d.getElementById('dimSec').style.display !== 'none');
+      var rk = d.getElementById('recipeKey');
+      chk('recipes listed', rk.options.length >= 6, rk.options.length);
+      chk('recipe fields built', d.querySelectorAll('#recipeFields .row').length > 0,
+        d.querySelectorAll('#recipeFields .row').length);
+      for (var ri = 0; ri < rk.options.length; ri++) {
+        var key = rk.options[ri].value;
+        rk.value = key;
+        rk.dispatchEvent(new w.Event('change'));
+        var stR = w.__app.state;
+        var br = badOf(stR.result.parts);
+        chk('recipe ' + key + ' valid', stR.result.parts.length >= 3 && br.length === 0,
+          stR.result.parts.length + ' | ' + br.slice(0, 2).join('|'));
+        chk('recipe ' + key + ' joints', (stR.result.info.tenonJoints || 0) + (stR.result.info.lapJoints || 0) > 0,
+          JSON.stringify(stR.result.info));
+        chk('recipe ' + key + ' nest ok',
+          w.Nest.verify(stR.nest, w.__app.sheetOpts()).length === 0 && stR.nest.oversize.length === 0,
+          'oversize=' + stR.nest.oversize.length);
+        chk('recipe ' + key + ' fields', d.querySelectorAll('#recipeFields .row').length >= 0);
+      }
+      // 改配方参数 -> 零件数变化
+      rk.value = 'grid';
+      rk.dispatchEvent(new w.Event('change'));
+      var gN = w.__app.state.result.parts.length;
+      var fd = d.getElementById('r_dividers');
+      chk('recipe field exists', !!fd);
+      fd.value = '';
+      fd.dispatchEvent(new w.Event('change'));
+      chk('recipe param applied', w.__app.state.result.parts.length < gN,
+        w.__app.state.result.parts.length + ' vs ' + gN);
+      fd.value = '300,600';
+      fd.dispatchEvent(new w.Event('change'));
+      chk('recipe param restored', w.__app.state.result.parts.length === gN, w.__app.state.result.parts.length);
+
+      /* ================= 板位表模式（三视图）================= */
+      d.getElementById('btnLoadPanels').click();
+      var stP = w.__app.state;
+      chk('cmode -> panels', stP.cmode === 'panels', stP.cmode);
+      chk('panels expanded from recipe', stP.panels.length === gN, stP.panels.length + '/' + gN);
+      chk('panels mode result', stP.result.parts.length === gN, stP.result.parts.length);
+      chk('panels valid', badOf(stP.result.parts).length === 0, badOf(stP.result.parts).slice(0, 3).join('|'));
+      chk('plan canvas visible', d.getElementById('planWrap').style.display !== 'none');
+      chk('plan canvas painted', painted('cvPlan') > 50, painted('cvPlan'));
+      chk('planHit callable', typeof stP.planHit === 'function');
+      // 三视图点选: 命中任意板
+      var hitAny = null;
+      for (var hx = 20; hx < 900 && !hitAny; hx += 25) {
+        for (var hy = 20; hy < 400 && !hitAny; hy += 25) {
+          hitAny = stP.planHit(hx, hy);
+        }
+      }
+      chk('plan hit-test finds a panel', !!hitAny, hitAny ? hitAny.name : 'none');
+
+      /* ---- 板位表 UI: "统一六列" 是否真的直观且真的接线了 ----
+       * 旧表头是 plane/at/u0/u1/v0/v1, 用户看不懂; 现在统一成
+       *   位置(左起X / 前起Y / 离地Z) + 尺寸(宽W / 深D / 高H)
+       * 这组断言盯的是"UI 上填的数 == 世界坐标里的数", 一旦互转接反就会红。 */
+      var GH = d.querySelectorAll('#editGrid thead tr');
+      chk('板位表: 表头两行(分组行 + 列名行)', GH.length === 2, GH.length);
+      var grpTxt = GH[0] ? GH[0].textContent : '';
+      chk('板位表: 分组行写明 位置/尺寸', /位置/.test(grpTxt) && /尺寸/.test(grpTxt), grpTxt.replace(/\s+/g, ' ').slice(0, 80));
+      var grp3 = Array.prototype.filter.call(GH[0].children, function (th) { return th.colSpan === 3; });
+      chk('板位表: 位置与尺寸各占 3 列', grp3.length === 2, grp3.map(function (t) { return t.textContent; }).join(' | '));
+      var colTxt = Array.prototype.map.call(GH[1].children, function (th) { return th.textContent; });
+      chk('板位表: 列名含 左起X/前起Y/离地Z',
+        colTxt.indexOf('左起 X') >= 0 && colTxt.indexOf('前起 Y') >= 0 && colTxt.indexOf('离地 Z') >= 0,
+        colTxt.slice(0, 10).join(','));
+      chk('板位表: 列名含 宽W/深D/高H',
+        colTxt.indexOf('宽 W') >= 0 && colTxt.indexOf('深 D') >= 0 && colTxt.indexOf('高 H') >= 0,
+        colTxt.slice(3, 10).join(','));
+      chk('板位表: 不再暴露 u0/u1/v0/v1 这类内部代号',
+        !/\bu0\b|\bu1\b|\bv0\b|\bv1\b/.test(colTxt.join(' ')), colTxt.join(','));
+      chk('板位表: 顶部有"怎么读这张表"的说明',
+        !!d.querySelector('#editGrid .gridLead') &&
+        /位置|尺寸/.test(d.querySelector('#editGrid .gridLead').textContent));
+
+      var iX = colTxt.indexOf('左起 X'), iY = colTxt.indexOf('前起 Y'), iZ = colTxt.indexOf('离地 Z');
+      var iW = colTxt.indexOf('宽 W'), iD = colTxt.indexOf('深 D'), iH = colTxt.indexOf('高 H');
+      var iOri = colTxt.indexOf('朝向');
+      chk('板位表: 朝向列存在', iOri >= 0, iOri);
+
+      /* 行 -> 板 的定位: 按板名输入框的值匹配, 免得被展开的特征行带偏 */
+      function rowOf(pid) {
+        var pnl = w.__app.state.panels.filter(function (q) { return q.id === pid; })[0];
+        if (!pnl) return null;
+        var rows = d.querySelectorAll('#editGrid tbody tr');
+        for (var ri = 0; ri < rows.length; ri++) {
+          var nm = rows[ri].children[1] && rows[ri].children[1].querySelector('input');
+          if (nm && nm.value === pnl.name) return rows[ri];
+        }
+        return null;
+      }
+      function cellInput(pid, ci) {
+        var tr2 = rowOf(pid);
+        return tr2 && tr2.children[ci] ? tr2.children[ci].querySelector('input,select') : null;
+      }
+
+      /* 朝向下拉必须是"人话", 不是 XY/YZ/XZ 代号 */
+      (function () {
+        var anyP = w.__app.state.panels[0];
+        var sl = cellInput(anyP.id, iOri);
+        chk('板位表: 朝向是下拉且用人话', !!sl && sl.tagName === 'SELECT' &&
+          /横放|竖放/.test(sl.textContent) && !/^XY$/.test(sl.options[0].textContent),
+          sl ? sl.textContent.replace(/\s+/g, ' ') : 'none');
+      })();
+
+      /* 六个尺寸格里恰有一个是板厚方向 -> 必须 disabled + .lock */
+      (function () {
+        var bad = [];
+        w.__app.state.panels.forEach(function (q) {
+          var locked = [];
+          [[iW, 'w'], [iD, 'd'], [iH, 'h']].forEach(function (pair) {
+            var e2 = cellInput(q.id, pair[0]);
+            if (e2 && e2.disabled && /lock/.test(e2.className)) locked.push(pair[1]);
+          });
+          var want = { XY: 'h', YZ: 'w', XZ: 'd' }[q.plane];
+          if (locked.length !== 1 || locked[0] !== want) bad.push(q.name + ':' + q.plane + '锁了[' + locked + ']应锁' + want);
+          // 位置三列必须都可编辑
+          [[iX, 'x'], [iY, 'y'], [iZ, 'z']].forEach(function (pair) {
+            var e3 = cellInput(q.id, pair[0]);
+            if (e3 && e3.disabled) bad.push(q.name + ':位置' + pair[1] + '被误锁');
+          });
+        });
+        chk('板位表: 板厚那一格自动置灰(其它 5 格可编辑)', bad.length === 0, bad.slice(0, 3).join(' ; '));
+      })();
+
+      /* 输入框里的数 == Custom.panelBox 算出的世界盒(显示不能骗人) */
+      (function () {
+        var bad = [];
+        w.__app.state.panels.forEach(function (q) {
+          var b = w.Custom.panelBox(q, w.__app.readParams().thickness);
+          [[iX, 'x'], [iY, 'y'], [iZ, 'z'], [iW, 'w'], [iD, 'd'], [iH, 'h']].forEach(function (pair) {
+            var e2 = cellInput(q.id, pair[0]);
+            if (!e2) { bad.push(q.name + ':缺格' + pair[1]); return; }
+            if (Math.abs(parseFloat(e2.value) - b[pair[1]]) > 0.02) {
+              bad.push(q.name + '.' + pair[1] + ' 显示' + e2.value + ' 实际' + b[pair[1]]);
+            }
+          });
+        });
+        chk('板位表: 显示的六个数 == 世界盒', bad.length === 0, bad.slice(0, 3).join(' ; '));
+      })();
+
+      /* 改「离地 Z」: 一块横放层板的 at 必须跟着走(而不是改到别的轴上) */
+      (function () {
+        var lay = w.__app.state.panels.filter(function (q) { return q.plane === 'XY'; })[0];
+        if (!lay) { chk('板位表: 存在横放板可测', false); return; }
+        var T = w.__app.readParams().thickness;
+        var e2 = cellInput(lay.id, iZ);
+        chk('板位表: 离地 Z 输入框存在', !!e2);
+        if (!e2) return;
+        var oldZ = w.Custom.panelBox(lay, T).z;
+        e2.value = String(oldZ + 40);
+        e2.dispatchEvent(new w.Event('change'));
+        var nb = w.Custom.panelBox(lay, T);
+        chk('板位表: 改 离地Z -> 世界 z 跟着走', Math.abs(nb.z - (oldZ + 40)) < 0.02, nb.z + ' vs ' + (oldZ + 40));
+        chk('板位表: 改 离地Z 只动 z(x/y 不受影响)',
+          Math.abs(nb.x - w.Custom.panelBox(lay, T).x) < 1e-9, nb.x);
+        // 复位
+        w.Custom.setPanelBox(lay, (function () { var b = w.Custom.panelBox(lay, T); b.z = oldZ; return b; })(), T);
+        w.__app.generate();
+      })();
+
+      /* 改「宽 W」: 竖放侧板的 W 是板厚(锁死), 横放层板的 W 要真能改 u 跨度 */
+      (function () {
+        var lay = w.__app.state.panels.filter(function (q) { return q.plane === 'XY'; })[0];
+        if (!lay) return;
+        var T = w.__app.readParams().thickness;
+        var e2 = cellInput(lay.id, iW);
+        if (!e2 || e2.disabled) { chk('板位表: 横放板的 宽W 可编辑', false, e2 ? 'disabled' : 'missing'); return; }
+        var b0 = w.Custom.panelBox(lay, T);
+        e2.value = String(b0.w - 30);
+        e2.dispatchEvent(new w.Event('change'));
+        var b1 = w.Custom.panelBox(lay, T);
+        chk('板位表: 改 宽W -> 世界 w 变小且左起 X 不动',
+          Math.abs(b1.w - (b0.w - 30)) < 0.02 && Math.abs(b1.x - b0.x) < 0.02,
+          'w ' + b0.w + '->' + b1.w + '  x ' + b0.x + '->' + b1.x);
+        w.Custom.setPanelBox(lay, b0, T);
+        w.__app.generate();
+      })();
+
+      /* 改「朝向」: 板不能瞬移 —— 世界盒中心必须守恒 */
+      (function () {
+        var T = w.__app.readParams().thickness;
+        var q = w.__app.state.panels.filter(function (o) { return o.plane === 'XY'; })[0];
+        if (!q) return;
+        var snap = { plane: q.plane, at: q.at, u0: q.u0, u1: q.u1, v0: q.v0, v1: q.v1 };
+        var b0 = w.Custom.panelBox(q, T);
+        var cen0 = [b0.x + b0.w / 2, b0.y + b0.d / 2, b0.z + b0.h / 2];
+        var sl = cellInput(q.id, iOri);
+        chk('板位表: 朝向下拉可操作', !!sl && sl.tagName === 'SELECT');
+        if (sl) {
+          sl.value = 'YZ';
+          sl.dispatchEvent(new w.Event('change'));
+          chk('板位表: 改朝向真的写进 state', q.plane === 'YZ', q.plane);
+          var b1 = w.Custom.panelBox(q, T);
+          var cen1 = [b1.x + b1.w / 2, b1.y + b1.d / 2, b1.z + b1.h / 2];
+          chk('板位表: 改朝向后板不瞬移(世界盒中心守恒)',
+            cen0.every(function (v, k) { return Math.abs(v - cen1[k]) < 0.02; }),
+            cen0.map(function (v) { return Math.round(v); }).join(',') + ' -> ' +
+            cen1.map(function (v) { return Math.round(v); }).join(','));
+          chk('板位表: 改朝向后新的板厚方向=板厚', Math.abs(b1.w - T) < 0.02, b1.w);
+        }
+        // 复位
+        q.plane = snap.plane; q.at = snap.at; q.u0 = snap.u0; q.u1 = snap.u1; q.v0 = snap.v0; q.v1 = snap.v1;
+        w.__app.generate();
+        w.Editor.render();
+      })();
+
+      /* 只读(结构配方展开)视图也要按同一组六列显示, 不能退回旧代号 */
+      (function () {
+        w.__app.setCmode('recipe');
+        var ro = d.querySelectorAll('#editGrid thead tr');
+        chk('配方只读表: 也是两行表头(与板位表同构)', ro.length === 2, ro.length);
+        var roTxt = ro.length === 2 ? Array.prototype.map.call(ro[1].children, function (th) { return th.textContent; }).join(',') : '';
+        chk('配方只读表: 同样是 离地Z/高H 这套列名', /离地 Z/.test(roTxt) && /高 H/.test(roTxt), roTxt.slice(0, 80));
+        w.__app.setCmode('panels');
+      })();
+      // 增删板
+      var pN = w.__app.state.panels.length;
+      d.getElementById('btnAddShelf').click();
+      chk('add shelf panel', w.__app.state.panels.length === pN + 1, w.__app.state.panels.length);
+      chk('new panel selected', !!w.__app.state.sel, w.__app.state.sel);
+      chk('add shelf -> more parts', w.__app.state.result.parts.length === pN + 1, w.__app.state.result.parts.length);
+      chk('after add still valid', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      d.getElementById('btnAddVert').click();
+      chk('add vert panel', w.__app.state.panels.length === pN + 2, w.__app.state.panels.length);
+      chk('after add vert valid', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      /* 智能落位: 新竖隔板只跨"最高的一格"而不贯通全高。
+       * 贯通会与该 x 上所有层板互穿(搭接), 而那些层板早已顶在旁边隔板上出了榫,
+       * 于是竖隔板的后边既要让搭接缺口又要出榫扎进背板 -> 过约束, 得放弃一部分接合。 */
+      var vAdd = w.__app.state.panels[w.__app.state.panels.length - 1];
+      chk('new vert spans one bay (not full height)',
+        (vAdd.v1 - vAdd.v0) < (w.__app.readParams().height - 2 * 15) - 1,
+        'v ' + vAdd.v0 + '..' + vAdd.v1);
+      d.getElementById('btnAddBack').click();
+      chk('add back panel', w.__app.state.panels.length === pN + 3, w.__app.state.panels.length);
+      chk('after add back valid', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      // 智能落位的结果不该产生"一条边被多处接合抢用"的过约束提示
+      chk('smart placement avoids over-constraint',
+        !/无法共存/.test(d.getElementById('msgs').textContent),
+        (d.getElementById('msgs').textContent.match(/[^。]*无法共存[^。]*/) || [''])[0].slice(0, 120));
+      // 手动改成贯通全高 -> 应变成 warn(不阻断) 且零件仍可切
+      var savedV = { v0: vAdd.v0, v1: vAdd.v1 };
+      vAdd.v0 = 15; vAdd.v1 = w.__app.readParams().height - 15;
+      w.__app.generate();
+      chk('over-constraint downgrades to cuttable parts', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      chk('over-constraint names the dropped joints',
+        /无法共存/.test(d.getElementById('msgs').textContent) &&
+        /【/.test(d.getElementById('msgs').textContent),
+        (d.getElementById('msgs').textContent.match(/[^。]*无法共存[^。]*/) || [''])[0].slice(0, 140));
+      chk('over-constraint still exports', w.CAD.toDXF(
+        w.__app.state.result.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0);
+      vAdd.v0 = savedV.v0; vAdd.v1 = savedV.v1;
+      w.__app.generate();
+      d.getElementById('btnDelPanel').click();
+      chk('del panel', w.__app.state.panels.length === pN + 2, w.__app.state.panels.length);
+      // 板位加工特征
+      w.__app.state.panels[0].pegboard = { dia: 10, pitch: 50, margin: 40 };
+      w.__app.generate();
+      chk('panel pegboard applied', w.__app.state.result.parts[0].holes.length > 3,
+        w.__app.state.result.parts[0].holes.length);
+      chk('panel peg valid', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      w.__app.state.panels[0].pegboard = null;
+      // 悬空板要给出警告
+      w.__app.state.panels.push({ id: 'FLY', name: '悬空板', plane: 'XY', at: 5000, u0: 0, u1: 300, v0: 0, v1: 200 });
+      w.__app.generate();
+      chk('floating panel warned', /悬空/.test(d.getElementById('msgs').textContent),
+        d.getElementById('msgs').textContent.slice(0, 60));
+      w.__app.state.panels.pop();
+      w.__app.generate();
+      // 空板位表: 给提示不崩
+      var keep = w.__app.state.panels;
+      w.__app.state.panels = [];
+      w.__app.generate();
+      chk('empty panels -> hint not crash', w.__app.state.result.parts.length === 0 &&
+        /板位表是空的/.test(d.getElementById('msgs').textContent), d.getElementById('msgs').textContent.slice(0, 40));
+      w.__app.state.panels = keep;
+      w.__app.generate();
+
+      /* ---- 实测板厚补偿 ---- */
+      w.__app.setCmode('recipe');
+      /* 标准化板厚: grid 配方的推荐尺寸为 18mm, 而前面的测试都在 15mm 上运行。
+       * 不手动重设板厚的话榫眼宽 = 18 + 0.2 = 18.2, 断言还是 15.2 -> 失败。 */
+      d.getElementById('thickness').value = 15;
+      rk.value = 'grid';
+      rk.dispatchEvent(new w.Event('change'));
+      /* 榫眼的"厚度方向"尺寸 = 板厚 + fit。用最小边长找它,
+       * 不能想当然拿 holes[0] —— 那可能是洞洞板孔或用户孔。 */
+      function mortiseW(parts) {
+        var best = null;
+        parts.forEach(function (p) {
+          p.holes.forEach(function (h) {
+            var b = w.G.loopBBox(h);
+            var mn = Math.min(b.w, b.h), mx = Math.max(b.w, b.h);
+            if (mx < mn * 1.5) return;                 // 近似方形/圆 -> 不是榫眼
+            if (best === null || mn < best) best = mn;
+          });
+        });
+        return best;
+      }
+      var mortBefore = mortiseW(w.__app.state.result.parts);
+      d.getElementById('realThickness').value = 14.4;
+      d.getElementById('realThickness').dispatchEvent(new w.Event('change'));
+      var mortAfter = mortiseW(w.__app.state.result.parts);
+      chk('real thickness changes mortise', mortBefore !== null && mortAfter !== null &&
+        Math.abs(mortBefore - mortAfter) > 0.4,
+        w.G.round(mortBefore, 3) + ' -> ' + w.G.round(mortAfter, 3));
+      // 榫眼宽必须 = 实测厚 + fit。这是"能不能敲进去"的唯一判据。
+      chk('mortise = real t + fit', mortAfter !== null && Math.abs(mortAfter - (14.4 + 0.2)) < 1e-6,
+        w.G.round(mortAfter, 4) + ' vs ' + (14.4 + 0.2));
+      chk('nominal mortise = 15 + fit', mortBefore !== null && Math.abs(mortBefore - (15 + 0.2)) < 1e-6,
+        w.G.round(mortBefore, 4));
+      chk('real thickness reported', /实测板厚/.test(d.getElementById('msgs').textContent));
+      chk('real thickness parts valid', badOf(w.__app.state.result.parts).length === 0,
+        badOf(w.__app.state.result.parts).slice(0, 3).join('|'));
+      d.getElementById('realThickness').value = 0;
+      d.getElementById('realThickness').dispatchEvent(new w.Event('change'));
+
+      /* ---- 子模式切换往返不丢数据 ---- */
+      w.__app.setCmode('list');
+      chk('back to list keeps rows', w.__app.state.rows.length > 0, w.__app.state.rows.length);
+      chk('list result matches rows',
+        w.__app.state.result.parts.length === w.__app.state.rows.filter(function (r) { return !r.off; }).length,
+        w.__app.state.result.parts.length);
+      w.__app.setCmode('panels');
+      chk('back to panels keeps panels', w.__app.state.panels.length > 0, w.__app.state.panels.length);
+      w.__app.setCmode('list');
+      // JSON 导出带上自定义数据
+      chk('json export carries custom', (function () {
+        var pj = { model: w.__app.state.model, custom: { cmode: w.__app.state.cmode, rows: w.__app.state.rows } };
+        return JSON.stringify(pj).indexOf('rows') > 0;
+      })());
+
+      /* ================= 图片生成 UI 端到端 ================= */
+      w.__app.selectModel('image');
+      var si = w.__app.state;
+      chk('image panel shown', d.getElementById('imgSec').style.display !== 'none');
+      chk('image hides overall dims', d.getElementById('dimSec').style.display === 'none');
+      chk('image preview tab shown', d.getElementById('tabImg').style.display !== 'none');
+      chk('no image -> no parts + hint', si.result.parts.length === 0 &&
+        /上传/.test(d.getElementById('msgs').textContent), d.getElementById('msgs').textContent.slice(0, 40));
+      chk('empty preview no crash', (function () { w.__app.showPane('img'); return true; })());
+
+      // 用示例图(等价于用户上传), 走 setImage 直接喂 ImageData
+      var samp = w.__app.sampleImage(1);
+      w.__app.setImode('silhouette');
+      w.__app.setImage(samp.data, samp.name);
+      var s3 = w.__app.state;
+      chk('image loaded info', /\d+×\d+ px/.test(d.getElementById('imgInfo').textContent), d.getElementById('imgInfo').textContent);
+      chk('drop zone marked', d.getElementById('drop').classList.contains('has'));
+      chk('silhouette parts', s3.result.parts.length === 2, s3.result.parts.map(function (p) { return p.name; }).join('/'));
+      chk('silhouette has base', s3.result.parts[s3.result.parts.length - 1].name === '底座');
+      chk('house has window holes', s3.result.parts[0].holes.length >= 2, s3.result.parts[0].holes.length);
+      chk('base has mortises', s3.result.parts[1].holes.length >= 1, s3.result.parts[1].holes.length);
+      var badI = [];
+      s3.result.parts.forEach(function (p) { p.validate().forEach(function (x) { if (x.level === 'error') badI.push(p.name + ':' + x.text); }); });
+      chk('image parts valid', badI.length === 0, badI.slice(0, 3).join('|'));
+      chk('auto switched to img pane', s3.pane === 'img', s3.pane);
+      chk('mask cached', !!s3.image.mask && !!s3.image.maskBBox);
+      chk('img canvas painted', painted('cvImg') > 50, painted('cvImg'));
+      // 三种预览模式都能画
+      ['mask', 'image', 'overlay'].forEach(function (pm) {
+        d.querySelector('#imgTools .chip[data-pmode="' + pm + '"]').click();
+        chk('preview mode ' + pm, w.__app.state.pmode === pm && painted('cvImg') > 50, painted('cvImg'));
+      });
+      chk('image nest clean', w.Nest.verify(s3.nest, w.__app.sheetOpts()).length === 0 && s3.nest.oversize.length === 0);
+      chk('image dxf ok', w.CAD.toDXF(w.__app.nestItems()).indexOf('EOF') > 0);
+      chk('image svg no NaN', w.CAD.toSVG(w.__app.partItems()).indexOf('NaN') < 0);
+      chk('image csv ok', w.CAD.toCSV(s3.result.parts).split('\r\n').length >= 3);
+
+      // 目标尺寸真的生效
+      d.getElementById('targetWidth').value = 0;
+      d.getElementById('targetHeight').value = 400;
+      d.getElementById('targetHeight').dispatchEvent(new w.Event('change'));
+      var mainP = w.__app.state.result.parts[0];
+      chk('targetHeight applied', Math.abs(mainP.bbox().h - 400) < 30, w.G.round(mainP.bbox().h, 1));
+      // 反相: 房子(黑图白底)反相后应取到背景 -> 形状变化
+      var before = w.__app.state.result.parts[0].outer.length;
+      d.getElementById('invert').checked = true;
+      d.getElementById('invert').dispatchEvent(new w.Event('change'));
+      chk('invert changes result', w.__app.state.result.parts.length === 0 ||
+        w.__app.state.result.parts[0].outer.length !== before, w.__app.state.result.parts.length);
+      d.getElementById('invert').checked = false;
+      d.getElementById('invert').dispatchEvent(new w.Event('change'));
+      // 手动阈值: 拖滑块应自动取消"自动阈值"
+      d.getElementById('threshold').value = 200;
+      d.getElementById('threshold').dispatchEvent(new w.Event('input'));
+      chk('manual threshold unchecks auto', !d.getElementById('autoThreshold').checked);
+      chk('manual threshold applied', w.__app.state.result.info.threshold === 200, w.__app.state.result.info.threshold);
+      d.getElementById('autoThreshold').checked = true;
+      d.getElementById('autoThreshold').dispatchEvent(new w.Event('change'));
+      chk('auto threshold disables slider', d.getElementById('threshold').disabled);
+      // 平滑开关: 关掉后顶点数应显著增加
+      var nSmooth = w.__app.state.result.info.nodes;
+      d.getElementById('smooth').checked = false;
+      d.getElementById('smooth').dispatchEvent(new w.Event('change'));
+      var nRaw = w.__app.state.result.info.nodes;
+      chk('smooth reduces nodes', nRaw > nSmooth, nSmooth + ' -> ' + nRaw);
+      d.getElementById('smooth').checked = true;
+      d.getElementById('smooth').dispatchEvent(new w.Event('change'));
+      // 去底座
+      d.getElementById('standStyle').value = 'none';
+      d.getElementById('standStyle').dispatchEvent(new w.Event('change'));
+      chk('standStyle none -> 1 part', w.__app.state.result.parts.length === 1, w.__app.state.result.parts.length);
+      d.getElementById('standStyle').value = 'tenon';
+      d.getElementById('standStyle').dispatchEvent(new w.Event('change'));
+
+      /* ---- 等高分层 ---- */
+      var samp2 = w.__app.sampleImage(2);
+      w.__app.setImode('layers');
+      w.__app.setImage(samp2.data, samp2.name);
+      chk('layers section shown', d.getElementById('layerSec').style.display !== 'none');
+      chk('silhouette section hidden', d.getElementById('silSec').style.display === 'none');
+      var s4 = w.__app.state;
+      chk('layers parts >= 4', s4.result.parts.length >= 4, s4.result.parts.length);
+      chk('layers info', s4.result.info.mode === '等高分层', JSON.stringify(s4.result.info));
+      var badL = [];
+      s4.result.parts.forEach(function (p) { p.validate().forEach(function (x) { if (x.level === 'error') badL.push(p.name + ':' + x.text); }); });
+      chk('layers parts valid', badL.length === 0, badL.slice(0, 3).join('|'));
+      // 面积逐层递减(台阶)
+      var seq = s4.result.parts.filter(function (p) { return /第\d+层/.test(p.name); })
+        .map(function (p) { return Math.abs(p.area()); });
+      var mono = seq.every(function (v, i) { return i === 0 || v <= seq[i - 1] + 1; });
+      chk('layers area monotonic', mono, seq.map(function (v) { return Math.round(v); }).join('>'));
+      // 销孔
+      var pinned = s4.result.parts.filter(function (p) {
+        return p.holes.some(function (h) { var b = w.G.loopBBox(h); return Math.abs(b.w - b.h) < 0.2 && b.w < 12; });
+      });
+      chk('layers pin holes', pinned.length === s4.result.parts.length, pinned.length + '/' + s4.result.parts.length);
+      d.getElementById('pinDia').value = 0;
+      d.getElementById('pinDia').dispatchEvent(new w.Event('change'));
+      chk('pinDia 0 -> no pins', w.__app.state.result.parts.every(function (p) {
+        return !p.holes.some(function (h) { var b = w.G.loopBBox(h); return Math.abs(b.w - b.h) < 0.2 && b.w < 12; });
+      }));
+      d.getElementById('pinDia').value = 6;
+      d.getElementById('pinDia').dispatchEvent(new w.Event('change'));
+      // 层数极值
+      [2, 12].forEach(function (n) {
+        d.getElementById('layerCount').value = n;
+        d.getElementById('layerCount').dispatchEvent(new w.Event('change'));
+        var bad = [];
+        w.__app.state.result.parts.forEach(function (p) { p.validate().forEach(function (x) { if (x.level === 'error') bad.push(x.text); }); });
+        chk('layerCount ' + n + ' ok', w.__app.state.result.parts.length >= n && bad.length === 0,
+          w.__app.state.result.parts.length + ' ' + bad.slice(0, 1).join(''));
+      });
+      d.getElementById('layerCount').value = 4;
+      d.getElementById('layerCount').dispatchEvent(new w.Event('change'));
+      chk('layers dxf ok', w.CAD.toDXF(w.__app.nestItems()).indexOf('EOF') > 0);
+      chk('layers all panes paint', (function () {
+        var ok = true;
+        ['nest', 'parts', 'asm', 'img'].forEach(function (pn) { w.__app.showPane(pn); });
+        w.__app.showPane('nest');
+        return ok && painted('cvNest') > 50;
+      })());
+      // 极端: 目标尺寸 1mm 不崩
+      d.getElementById('targetHeight').value = 1;
+      d.getElementById('targetHeight').dispatchEvent(new w.Event('change'));
+      chk('tiny target no crash', !!w.__app.state);
+      d.getElementById('targetHeight').value = 300;
+      d.getElementById('targetHeight').dispatchEvent(new w.Event('change'));
+      // 空白图 -> 报错而非崩
+      var blank = d.createElement('canvas'); blank.width = 80; blank.height = 80;
+      var bg = blank.getContext('2d'); bg.fillStyle = '#fff'; bg.fillRect(0, 0, 80, 80);
+      w.__app.setImage(bg.getImageData(0, 0, 80, 80), 'blank');
+      chk('blank image -> error not crash', w.__app.state.result.parts.length === 0 &&
+        d.querySelectorAll('#msgs .msg.error').length > 0, d.getElementById('msgs').textContent.slice(0, 40));
+      chk('blank image preview ok', (function () { w.__app.showPane('img'); return true; })());
+
+      /* ---- 3D 装配: 每种模式都要能立起来(不能全叠在原点) ---- */
+      var samp3 = w.__app.sampleImage(1);
+      w.__app.setImode('silhouette');
+      d.getElementById('standStyle').value = 'tenon';
+      d.getElementById('standStyle').dispatchEvent(new w.Event('change'));
+      w.__app.setImage(samp3.data, samp3.name);
+      w.__app.showPane('asm');
+      chk('立牌 3D 画布有内容', painted('cvAsm') > 50, painted('cvAsm'));
+      var bx = w.Render.boxesFrom(w.__app.state.result.parts, { t: 12 });
+      chk('立牌 3D: 2 个盒子', bx.length === 2, bx.length);
+      var body = bx[0], base = bx[1];
+      chk('立牌 3D: 本体厚度沿 y(竖着立)', body.size.y === 12 && body.size.z > body.size.y, JSON.stringify(body.size));
+      chk('立牌 3D: 底座厚度沿 z(平放)', base.size.z === 12, JSON.stringify(base.size));
+      // 本体必须落在底座的水平范围内, 否则 3D 看着是"飘在旁边"
+      chk('立牌 3D: 本体 x 落在底座内',
+        body.pos.x >= base.pos.x - 1e-6 && body.pos.x + body.size.x <= base.pos.x + base.size.x + 1e-6,
+        body.pos.x + '+' + w.G.round(body.size.x, 1) + ' in 0..' + w.G.round(base.size.x, 1));
+      chk('立牌 3D: 本体 y 落在底座内',
+        body.pos.y >= base.pos.y - 1e-6 && body.pos.y <= base.pos.y + base.size.y + 1e-6,
+        w.G.round(body.pos.y, 1) + ' in 0..' + w.G.round(base.size.y, 1));
+      chk('立牌 3D: 本体 x 居中于底座',
+        Math.abs((body.pos.x + body.size.x / 2) - (base.pos.x + base.size.x / 2)) < 1,
+        w.G.round(body.pos.x + body.size.x / 2, 1) + ' vs ' + w.G.round(base.pos.x + base.size.x / 2, 1));
+
+      // 分层: z 必须逐层递增一个板厚, 否则 3D 里所有层重叠成一片
+      var samp4 = w.__app.sampleImage(2);
+      w.__app.setImode('layers');
+      d.getElementById('layerCount').value = 4;
+      d.getElementById('layerCount').dispatchEvent(new w.Event('change'));
+      w.__app.setImage(samp4.data, samp4.name);
+      var lb = w.Render.boxesFrom(w.__app.state.result.parts, { t: +d.getElementById('thickness').value })
+        .filter(function (q) { return /第\d+层/.test(q.name); })
+        .sort(function (a, b) { return a.pos.z - b.pos.z; });
+      chk('分层 3D: 4 层', lb.length === 4, lb.length);
+      var tk = w.__app.readParams().thickness;
+      var zOk = lb.every(function (q, i) { return Math.abs(q.pos.z - i * tk) < 1e-6; });
+      chk('分层 3D: z 逐层 +板厚', zOk, lb.map(function (q) { return q.pos.z; }).join(','));
+      chk('分层 3D: 层间不重叠', lb.every(function (q) { return Math.abs(q.size.z - tk) < 1e-6; }),
+        lb.map(function (q) { return q.size.z; }).join(','));
+      w.__app.showPane('asm');
+      chk('分层 3D 画布有内容', painted('cvAsm') > 50, painted('cvAsm'));
+
+      /* 自定义结构的 3D。
+       * 注意: 清单模式产出的是一堆独立平板(没有空间关系), 3D 里都落在原点是
+       * 正常的 —— 要验证"板真的立起来了"必须用有空间信息的配方/板位模式。 */
+      w.__app.selectModel('custom');
+      w.__app.setCmode('recipe');
+      w.__app.showPane('asm');
+      chk('自定义 3D 画布有内容', painted('cvAsm') > 50, painted('cvAsm'));
+      /* 【不要写死 15】前面的图片用例把板厚改成了 IMAGE_DIMS 的 12mm,
+       * 而 setCmode('recipe') 按设计**不**重置整体尺寸(否则切子模式会把
+       * 用户刚填的尺寸抹掉)。所以这里必须问当前真实板厚。 */
+      var cbT = w.__app.readParams().thickness;
+      var cb = w.Render.boxesFrom(w.__app.state.result.parts, { t: cbT });
+      chk('自定义 3D: 盒子数 = 零件数', cb.length === w.__app.state.result.parts.length, cb.length);
+      chk('自定义 3D: 不全在原点', new Set(cb.map(function (q) { return q.pos.x + ',' + q.pos.y + ',' + q.pos.z; })).size > 3,
+        new Set(cb.map(function (q) { return q.pos.x + ',' + q.pos.y + ',' + q.pos.z; })).size);
+      /* 立板厚度必须沿其法向, 而不是被当成"宽" —— 曾经 asm 元数据不全时会摊平 */
+      chk('自定义 3D: YZ 板厚度沿 x', cb.filter(function (q) {
+        return q.part.meta.asm.plane === 'YZ';
+      }).every(function (q) { return Math.abs(q.size.x - cbT) < 1e-6; }),
+        cb.filter(function (q) { return q.part.meta.asm.plane === 'YZ'; }).map(function (q) { return q.size.x; }).join(','));
+      chk('自定义 3D: XY 板厚度沿 z', cb.filter(function (q) {
+        return q.part.meta.asm.plane === 'XY';
+      }).every(function (q) { return Math.abs(q.size.z - cbT) < 1e-6; }),
+        cb.filter(function (q) { return q.part.meta.asm.plane === 'XY'; }).map(function (q) { return q.size.z; }).join(','));
+      // 清单模式的板确实全在原点(不做空间装配), 这是设计而非 bug
+      w.__app.setCmode('list');
+      var lb2 = w.Render.boxesFrom(w.__app.state.result.parts, { t: 15 });
+      chk('清单模式 3D: 平铺在原点(设计如此)',
+        lb2.every(function (q) { return q.pos.x === 0 && q.pos.y === 0 && q.pos.z === 0; }));
+      w.__app.selectModel('image');
+
+      /* ============================================================
+       * \u4e09\u89c6\u56fe\u62d6\u62fd + \u5bf9\u9f50 / \u7b49\u95f4\u8ddd (\u771f\u5b9e DOM \u4e8b\u4ef6)
+       * ============================================================ */
+      (function () {
+        var C = w.Custom, E = w.Editor, T = 15;
+        w.__app.selectModel('custom');
+        w.__app.setCmode('panels');
+        /* 【必须先把板厚输入框设成 T】下面直接往 st.panels 塞了一批按 T 算好的板位
+         * (at = 中心面), 而 Editor 渲染表格/三视图时用的是 **UI 里的板厚**
+         * (ctx.thickness())。两边不一致时 panelBox 的 z = at - t/2 会差 (T-t)/2:
+         * 前面的图片用例把板厚留在了 IMAGE_DIMS 的 12mm ->
+         * 拖拽断言里表格显示 560.7 而 panelBox(.., 15) 算出 559.2, 差恰好 1.5 = (15-12)/2。
+         * 这是测试自身的数据不自洽, 真用户改板厚时板位跟着重算是对的。 */
+        d.getElementById('thickness').value = T;
+        d.getElementById('thickness').dispatchEvent(new w.Event('change', { bubbles: true }));
+        st.panels = C.recipePanels('grid', {
+          thickness: T, width: 600, depth: 300, height: 720, dividers: [300], shelvesPerBay: [1, 1]
+        });
+        w.__app.generate(); E.render();
+        chk('\u62d6\u62fd: \u9884\u7f6e\u677f\u4f4d\u5c55\u5f00', st.panels.length >= 6, st.panels.length);
+        chk('\u62d6\u62fd: planPick \u5df2\u6302\u4e0a', typeof st.planPick === 'function');
+        /* \u4e0d\u80fd\u53ea\u67e5 style.display !== 'none': CSS \u9ed8\u8ba4\u5c31\u662f none,
+         * JS \u5199 '' \u4f1a\u9000\u56de CSS -> \u5de5\u5177\u6761\u6c38\u8fdc\u4e0d\u663e\u793a\u4f46\u65ad\u8a00\u5047\u7eff\u3002\u5fc5\u987b\u67e5\u771f\u5b9e\u5e03\u5c40\u3002 */
+        w.__app.showPane('edit');
+        var abEl = d.getElementById('alignBar');
+        chk('\u62d6\u62fd: alignBar \u5b58\u5728', !!abEl);
+        chk('\u62d6\u62fd: alignBar \u771f\u7684\u5e03\u5c40\u51fa\u6765\u4e86(\u975e display:none)',
+          abEl.getClientRects().length > 0 && w.getComputedStyle(abEl).display !== 'none' &&
+          abEl.getBoundingClientRect().height > 8,
+          w.getComputedStyle(abEl).display + ' h=' + abEl.getBoundingClientRect().height);
+        var abtn = d.querySelectorAll('#alignBar button');
+        chk('\u5bf9\u9f50: 9 \u4e2a\u5bf9\u9f50 + 6 \u4e2a\u5206\u5e03 + \u6e05\u9664 = 16 \u4e2a\u6309\u94ae', abtn.length === 16, abtn.length);
+
+        var cv = d.getElementById('cvPlan');
+        /* 坐标换算必须用**当下**的 canvas 矩形, 不能缓存。
+         *
+         * 旧版在这里缓存了一份 rct, 之后的用例又会换配方 + generate(),
+         * 而 generate() 会重写顶部统计条。统计条是 flex-wrap 的 ——
+         * 条目一多就换行变高, 把下方的三视图 canvas 整体往下推、高度变小。
+         * 于是缓存的 rct.top 偏小, 派发出去的 clientY 就系统性偏上几十像素,
+         * 点击落到隔壁面板上(实测变成了 D0) —— 看起来像“多选坏了”,
+         * 实际是测试自己拿陈旧坐标在点。editor.js 里的 cvPos() 本来
+         * 就是每次重新取 getBoundingClientRect(), 测试必须跟它保持一致。 */
+        function ev(type, x, y, mod) {
+          var rct = cv.getBoundingClientRect();
+          var o = { clientX: rct.left + x, clientY: rct.top + y, bubbles: true };
+          if (mod) for (var k in mod) o[k] = mod[k];
+          return new w.MouseEvent(type, o);
+        }
+        function plan() { return w.Render.drawPlan(cv, st.panels, { thickness: T }); }
+        function rectOf(vkey, id) {
+          var pr = plan(); st.planPick = pr.pick;
+          var V = pr.views.filter(function (q) { return q.key === vkey; })[0], out = null;
+          V.rects.forEach(function (q) { if (q.panel.id === id) out = q; });
+          return { view: V, rect: out };
+        }
+        function box(id) {
+          var p = st.panels.filter(function (q) { return q.id === id; })[0];
+          return p ? C.panelBox(p, T) : null;
+        }
+        var shelves = st.panels.filter(function (p) { return p.plane === 'XY'; });
+        chk('\u62d6\u62fd: \u6c34\u5e73\u677f \u2265 3 \u5757', shelves.length >= 3, shelves.length);
+        var target = shelves[shelves.length - 1];
+
+        /* ---- \u4e00\u6b21\u5b8c\u6574\u62d6\u62fd ---- */
+        var rr = rectOf('front', target.id);
+        chk('\u62d6\u62fd: \u76ee\u6807\u677f\u5728\u6b63\u89c6\u91cc\u6709\u77e9\u5f62', !!rr.rect);
+        var cx = rr.rect.x + rr.rect.w / 2, cy = rr.rect.y + rr.rect.h / 2;
+        var b0 = box(target.id);
+        cv.dispatchEvent(ev('mousedown', cx, cy));
+        chk('\u62d6\u62fd: \u6309\u4e0b\u5373\u9009\u4e2d', st.sel === target.id, st.sel);
+        chk('\u62d6\u62fd: \u6309\u4e0b\u540e drag \u6d3b\u8dc3', !!E.__drag());
+        w.dispatchEvent(ev('mousemove', cx, cy - 60));
+        var bm = box(target.id);
+        chk('\u62d6\u62fd: \u5c4f\u5e55\u5f80\u4e0a\u62d6 -> z \u53d8\u5927', bm.z > b0.z + 10, b0.z + ' -> ' + bm.z);
+        chk('\u62d6\u62fd: \u62d6\u52a8\u4e2d\u5c3a\u5bf8\u4e0d\u53d8', Math.abs(bm.w - b0.w) < 1e-9 && Math.abs(bm.d - b0.d) < 1e-9 && Math.abs(bm.h - b0.h) < 1e-9);
+        chk('\u62d6\u62fd: \u6b63\u89c6\u91cc\u4e0d\u52a8 y', Math.abs(bm.y - b0.y) < 1e-9, bm.y);
+        w.dispatchEvent(ev('mouseup', cx, cy - 60));
+        var b1 = box(target.id);
+        chk('\u62d6\u62fd: \u677e\u624b\u540e drag \u6e05\u7a7a', !E.__drag());
+        chk('\u62d6\u62fd: \u843d\u70b9\u5df2\u5706\u6574\u5230 0.1mm', Math.abs(b1.z * 10 - Math.round(b1.z * 10)) < 1e-9, b1.z);
+        /* \u8868\u683c\u91cc\u7684\u6570\u5b57\u5fc5\u987b\u8ddf\u7740\u53d8 \u2014\u2014 \u5426\u5219\u7528\u6237\u62d6\u5b8c\u8fd8\u4ee5\u4e3a\u6ca1\u751f\u6548 */
+        var rowNums = d.querySelectorAll('#editGrid tbody tr.sel input[type=number]');
+        chk('\u62d6\u62fd: \u677f\u4f4d\u8868\u7684\u79bb\u5730 Z \u8ddf\u7740\u5237\u65b0',
+          rowNums.length >= 6 && Math.abs(parseFloat(rowNums[2].value) - b1.z) < 0.05,
+          rowNums.length ? rowNums[2].value + ' vs ' + b1.z : 'no row');
+
+        /* ---- \u4fef\u89c6\u91cc\u62d6 = \u52a8 x/y, \u4e0d\u5f97\u78b0 z ---- */
+        var rr2 = rectOf('top', target.id);
+        var b2 = box(target.id);
+        var tx = rr2.rect.x + rr2.rect.w / 2, ty = rr2.rect.y + rr2.rect.h / 2;
+        cv.dispatchEvent(ev('mousedown', tx, ty));
+        w.dispatchEvent(ev('mousemove', tx, ty + 25));
+        var b3 = box(target.id);
+        w.dispatchEvent(ev('mouseup', tx, ty + 25));
+        chk('\u62d6\u62fd: \u4fef\u89c6\u91cc\u62d6\u4e0d\u6539 z(\u9ad8\u5ea6)', Math.abs(box(target.id).z - b2.z) < 1e-9, b2.z + ' -> ' + box(target.id).z);
+        chk('\u62d6\u62fd: \u4fef\u89c6\u91cc\u62d6\u6539\u4e86 y(\u524d\u540e)', Math.abs(b3.y - b2.y) > 1e-9 || Math.abs(b3.x - b2.x) > 1e-9, JSON.stringify([b2.x, b2.y, b3.x, b3.y]));
+
+        /* ---- \u5438\u9644\u4f7f\u699f\u536f\u80fd\u751f\u6210: \u62d6\u5230\u4fa7\u677f\u9644\u8fd1\u540e\u5fc5\u987b\u771f\u7684\u76f8\u4ea4 ---- */
+        (function () {
+          var side = st.panels.filter(function (p) { return p.plane === 'YZ'; })[0];
+          var sb = C.panelBox(side, T);
+          var mv = C.movePanel(st.panels, target, { x: sb.x + sb.w + 0.8 }, ['x'], T, { tol: 6 });
+          chk('\u5438\u9644: \u62a5\u544a\u4e86\u5438\u9644', mv.snaps.length >= 1, JSON.stringify(mv.snaps.map(function (q) { return q.label; })));
+          chk('\u5438\u9644: \u5438\u5b8c\u4e0e\u4fa7\u677f\u76f8\u4ea4', !!C.intersect(target, side, T));
+        })();
+
+        /* ---- Alt \u4e34\u65f6\u5173\u95ed\u5438\u9644 ---- */
+        (function () {
+          var rr3 = rectOf('front', target.id);
+          var ax = rr3.rect.x + rr3.rect.w / 2, ay = rr3.rect.y + rr3.rect.h / 2;
+          cv.dispatchEvent(ev('mousedown', ax, ay));
+          w.dispatchEvent(ev('mousemove', ax, ay - 3, { altKey: true }));
+          var snapsAlt = E.__snaps().length;
+          w.dispatchEvent(ev('mouseup', ax, ay - 3, { altKey: true }));
+          chk('\u62d6\u62fd: Alt \u65f6\u4e0d\u5438\u9644', snapsAlt === 0, snapsAlt);
+        })();
+
+        /* ---- \u591a\u9009: Ctrl \u70b9\u7b2c\u4e8c\u5757 ---- */
+        st.panels = C.recipePanels('grid', {
+          thickness: T, width: 600, depth: 300, height: 720, dividers: [300], shelvesPerBay: [2, 2]
+        });
+        w.__app.generate(); E.render();
+        var hs = st.panels.filter(function (p) { return p.plane === 'XY'; });
+        chk('\u591a\u9009: \u6c34\u5e73\u677f \u2265 4 \u5757', hs.length >= 4, hs.length);
+        var pick3 = hs.slice(0, 3);
+        pick3.forEach(function (p, i) {
+          var q = rectOf('front', p.id);
+          var qx = q.rect.x + q.rect.w / 2, qy = q.rect.y + q.rect.h / 2;
+          cv.dispatchEvent(ev('mousedown', qx, qy, i ? { ctrlKey: true } : null));
+          w.dispatchEvent(ev('mouseup', qx, qy, i ? { ctrlKey: true } : null));
+        });
+        chk('\u591a\u9009: selIds = 3', E.selIds().length === 3, JSON.stringify(E.selIds()));
+        chk('\u591a\u9009: st.sel \u5728\u9009\u96c6\u91cc', E.selIds().indexOf(st.sel) >= 0, st.sel);
+        chk('\u591a\u9009: \u5bf9\u9f50\u6309\u94ae\u5df2\u53ef\u7528', d.querySelectorAll('#alignBar button:disabled').length === 0,
+          d.querySelectorAll('#alignBar button:disabled').length);
+        chk('\u591a\u9009: \u8868\u683c\u91cc 3 \u884c\u9ad8\u4eae', d.querySelectorAll('#editGrid tbody tr.sel').length === 3,
+          d.querySelectorAll('#editGrid tbody tr.sel').length);
+
+        /* ---- \u4e00\u8d77\u62d6: \u76f8\u5bf9\u5173\u7cfb\u4e0d\u53d8 ---- */
+        (function () {
+          var ids = E.selIds();
+          var before = ids.map(function (id) { return box(id).z; });
+          var lead = ids[ids.length - 1];
+          var q = rectOf('front', lead);
+          var qx = q.rect.x + q.rect.w / 2, qy = q.rect.y + q.rect.h / 2;
+          cv.dispatchEvent(ev('mousedown', qx, qy, { ctrlKey: false, shiftKey: false }));
+          /* \u6ce8: \u4e0d\u5e26\u4fee\u9970\u952e\u4e14\u5df2\u5728\u9009\u96c6\u91cc -> \u4e0d\u5e94\u8be5\u628a\u9009\u96c6\u6539\u6210\u5355\u9009 */
+          chk('\u591a\u9009: \u62d6\u5df2\u9009\u4e2d\u7684\u677f\u4e0d\u4f1a\u4e22\u9009\u96c6', E.selIds().length === 3, JSON.stringify(E.selIds()));
+          w.dispatchEvent(ev('mousemove', qx, qy - 40, { altKey: true }));
+          var mid = ids.map(function (id) { return box(id).z; });
+          w.dispatchEvent(ev('mouseup', qx, qy - 40, { altKey: true }));
+          var dz = mid.map(function (v, i) { return v - before[i]; });
+          chk('\u591a\u9009: \u4e09\u5757\u4f4d\u79fb\u5b8c\u5168\u4e00\u81f4(\u76f8\u5bf9\u5173\u7cfb\u4fdd\u6301)',
+            dz.every(function (v) { return Math.abs(v - dz[0]) < 1e-9; }), dz.map(function (v) { return Math.round(v * 100) / 100; }).join('/'));
+          chk('\u591a\u9009: \u4f4d\u79fb\u975e\u96f6', Math.abs(dz[0]) > 5, dz[0]);
+        })();
+
+        /* ---- \u5bf9\u9f50\u6309\u94ae\u771f\u7684\u80fd\u70b9 ---- */
+        (function () {
+          var ids = E.selIds();
+          var btns = d.querySelectorAll('#alignBar .agrp button');
+          chk('\u5bf9\u9f50: \u6bcf\u7ec4 5 \u4e2a\u6309\u94ae \u00d7 3 \u7ec4', btns.length === 15, btns.length);
+          /* \u7b2c\u4e09\u7ec4(\u4e0a\u4e0b) \u7684\u7b2c\u4e00\u4e2a = \u5e95\u5bf9\u9f50 */
+          var g3 = d.querySelectorAll('#alignBar .agrp')[2];
+          g3.querySelectorAll('button')[0].click();
+          var zs = ids.map(function (id) { return box(id).z; });
+          chk('\u5bf9\u9f50: \u5e95\u5bf9\u9f50\u540e z \u5168\u76f8\u7b49', zs.every(function (v) { return Math.abs(v - zs[0]) < 1e-9; }), zs.join('/'));
+          chk('\u5bf9\u9f50: \u63d0\u793a\u6d88\u606f\u5df2\u663e\u793a', !!d.querySelector('#alignBar .alignMsg'),
+            d.querySelector('#alignBar .alignMsg') ? d.querySelector('#alignBar .alignMsg').textContent : 'none');
+        })();
+
+        /* ---- \u7b49\u95f4\u8ddd\u6309\u94ae ---- */
+        (function () {
+          /* \u5148\u628a\u4e09\u5757\u6446\u56de\u4e0d\u540c\u9ad8\u5ea6 */
+          var ids = E.selIds();
+          [120, 337, 588].forEach(function (z, i) {
+            var p = st.panels.filter(function (q) { return q.id === ids[i]; })[0];
+            var b = C.panelBox(p, T); b.z = z; C.setPanelBox(p, b, T);
+          });
+          E.render();
+          var g3 = d.querySelectorAll('#alignBar .agrp')[2];
+          var dbtn = g3.querySelectorAll('button')[3];
+          chk('\u7b49\u95f4\u8ddd: \u6309\u94ae\u6587\u6848', dbtn.textContent.indexOf('\u7b49\u95f4\u8ddd') >= 0, dbtn.textContent);
+          dbtn.click();
+          var bs = ids.map(function (id) { return box(id); }).sort(function (a, b) { return a.z - b.z; });
+          var gaps = [];
+          for (var i = 0; i < bs.length - 1; i++) gaps.push(bs[i + 1].z - (bs[i].z + bs[i].h));
+          chk('\u7b49\u95f4\u8ddd: \u51c0\u7a7a\u76f8\u7b49(\u00b10.15mm, \u5706\u6574\u5230 0.1 \u540e)',
+            gaps.every(function (g) { return Math.abs(g - gaps[0]) < 0.15; }), gaps.map(function (g) { return Math.round(g * 100) / 100; }).join('/'));
+          chk('\u7b49\u95f4\u8ddd: \u9996\u672b\u4e0d\u52a8', Math.abs(bs[0].z - 120) < 0.05 && Math.abs(bs[bs.length - 1].z - 588) < 0.05,
+            bs[0].z + '/' + bs[bs.length - 1].z);
+          var g3b = d.querySelectorAll('#alignBar .agrp')[2].querySelectorAll('button')[4];
+          chk('\u7b49\u95f4\u8ddd: \u4e2d\u7ebf\u7b49\u8ddd\u6309\u94ae\u5b58\u5728', g3b.textContent.indexOf('\u4e2d\u7ebf') >= 0, g3b.textContent);
+          g3b.click();
+          var cs = ids.map(function (id) { var b = box(id); return b.z + b.h / 2; }).sort(function (a, b) { return a - b; });
+          chk('\u4e2d\u7ebf\u7b49\u8ddd: \u4e2d\u7ebf\u95f4\u8ddd\u76f8\u7b49', Math.abs((cs[1] - cs[0]) - (cs[2] - cs[1])) < 0.15,
+            (cs[1] - cs[0]) + '/' + (cs[2] - cs[1]));
+        })();
+
+        /* ---- \u5bf9\u9f50\u4e4b\u540e\u4ecd\u80fd\u751f\u6210\u5408\u6cd5\u96f6\u4ef6 ---- */
+        w.__app.generate();
+        var badE = d.querySelectorAll('#msgs .msg.error');
+        chk('\u5bf9\u9f50\u540e: \u65e0 error \u6d88\u606f', badE.length === 0,
+          Array.prototype.map.call(badE, function (e) { return e.textContent; }).join(' | '));
+        chk('\u5bf9\u9f50\u540e: \u96f6\u4ef6\u5168\u90e8\u5408\u6cd5', (function () {
+          var n = 0;
+          st.result.parts.forEach(function (p) {
+            p.validate().forEach(function (m) { if (m.level === 'error') n++; });
+          });
+          return n === 0;
+        })());
+
+        /* ---- \u70b9\u7a7a\u767d = \u53d6\u6d88\u9009\u4e2d ---- */
+        (function () {
+          var pr = plan(); st.planPick = pr.pick;
+          var V = pr.views[0];
+          cv.dispatchEvent(ev('mousedown', V.gx + 3, V.gy + V.ch - 3));
+          w.dispatchEvent(ev('mouseup', V.gx + 3, V.gy + V.ch - 3));
+          chk('\u9009\u62e9: \u70b9\u7a7a\u767d\u6e05\u7a7a\u9009\u96c6', E.selIds().length === 0, JSON.stringify(E.selIds()));
+          chk('\u9009\u62e9: \u6e05\u7a7a\u540e\u5bf9\u9f50\u6309\u94ae\u53d8\u7f6e\u7070',
+            d.querySelectorAll('#alignBar button:disabled').length === 16,
+            d.querySelectorAll('#alignBar button:disabled').length);
+        })();
+
+        /* ---- \u914d\u65b9\u9884\u89c8(\u53ea\u8bfb)\u4e0d\u53ef\u62d6 ---- */
+        w.__app.setCmode('recipe');
+        E.render();
+        (function () {
+          var pv = w.Editor.derivedPanels();
+          var pr = w.Render.drawPlan(cv, pv, { thickness: T });
+          st.planPick = pr.pick;
+          var V = pr.views[0], rc = V.rects[V.rects.length - 1];
+          var b4 = JSON.stringify(pv);
+          cv.dispatchEvent(ev('mousedown', rc.x + rc.w / 2, rc.y + rc.h / 2));
+          chk('\u53ea\u8bfb: \u914d\u65b9\u6a21\u5f0f\u4e0d\u8fdb\u5165\u62d6\u62fd', !E.__drag());
+          w.dispatchEvent(ev('mousemove', rc.x + rc.w / 2, rc.y + rc.h / 2 - 40));
+          w.dispatchEvent(ev('mouseup', rc.x + rc.w / 2, rc.y + rc.h / 2 - 40));
+          chk('\u53ea\u8bfb: \u914d\u65b9\u5c55\u5f00\u7684\u677f\u4f4d\u672a\u88ab\u6539\u52a8', JSON.stringify(w.Editor.derivedPanels()) === b4);
+          chk('\u53ea\u8bfb: alignBar \u9690\u85cf(\u771f\u7684\u4e0d\u5360\u4f4d)',
+            d.getElementById('alignBar').getClientRects().length === 0 &&
+            w.getComputedStyle(d.getElementById('alignBar')).display === 'none',
+            w.getComputedStyle(d.getElementById('alignBar')).display);
+        })();
+        /* \u6e05\u5355\u6a21\u5f0f: \u4e09\u89c6\u56fe\u6574\u4f53\u9690\u85cf */
+        w.__app.setCmode('list');
+        E.render();
+        chk('\u6e05\u5355\u6a21\u5f0f: \u4e09\u89c6\u56fe\u9690\u85cf\u4e14 planPick \u6e05\u7a7a',
+          d.getElementById('planWrap').style.display === 'none' && !st.planPick);
+      })();
+
+      // 切回普通模型: 图片面板与 tab 应隐藏
+      /* ============================================================
+       * \u677f\u539a\u81ea\u5b9a\u4e49\u8f93\u5165
+       * \u65e7\u7248\u662f <select>(9/12/15/18/21/25), \u586b 16.5 \u4f1a\u9759\u9ed8\u53d8\u6210\u7a7a\u4e32 -> t=0 -> \u699f\u5bbd\u5168 0\u3002
+       * ============================================================ */
+      (function () {
+        w.__app.selectModel('box');
+        var ti = d.getElementById('thickness');
+        chk('\u677f\u539a: \u5df2\u6539\u6210 number \u8f93\u5165\u6846(\u4e0d\u518d\u662f\u4e0b\u62c9)',
+          ti.tagName === 'INPUT' && ti.type === 'number', ti.tagName + '/' + ti.type);
+        chk('\u677f\u539a: \u6709 min/max \u62a4\u680f', +ti.min > 0 && +ti.max >= 40, ti.min + '..' + ti.max);
+        chk('\u677f\u539a: \u6b65\u8fdb\u652f\u6301\u5c0f\u6570', parseFloat(ti.step) < 1, ti.step);
+        chk('\u677f\u539a: \u5e38\u7528\u539a\u5ea6 chip = 6 \u4e2a', d.querySelectorAll('#thickChips .chip').length === 6,
+          d.querySelectorAll('#thickChips .chip').length);
+
+        function setT(v) {
+          ti.value = String(v);
+          ti.dispatchEvent(new w.Event('input', { bubbles: true }));
+          ti.dispatchEvent(new w.Event('change', { bubbles: true }));
+        }
+        /* \u975e\u5217\u8868\u503c: 16.5 / 13.8 / 22.3 \u90fd\u5fc5\u987b\u771f\u7684\u751f\u6548 */
+        [16.5, 13.8, 22.3, 7.5].forEach(function (v) {
+          setT(v);
+          var p = w.__app.readParams();
+          chk('\u677f\u539a ' + v + ': readParams \u62ff\u5230\u539f\u503c', Math.abs(p.thickness - v) < 1e-9, p.thickness);
+          chk('\u677f\u539a ' + v + ': \u96f6\u4ef6\u539a\u5ea6\u8ddf\u7740\u53d8',
+            st.result.parts.every(function (q) { return Math.abs(q.thickness - v) < 1e-9; }),
+            st.result.parts.map(function (q) { return q.thickness; }).join(','));
+          var pe = 0;
+          st.result.parts.forEach(function (q) { q.validate().forEach(function (m) { if (m.level === 'error') pe++; }); });
+          chk('\u677f\u539a ' + v + ': \u96f6\u4ef6\u5168\u5408\u6cd5', pe === 0, pe);
+          chk('\u677f\u539a ' + v + ': \u65e0 error \u6d88\u606f', d.querySelectorAll('#msgs .msg.error').length === 0,
+            Array.prototype.map.call(d.querySelectorAll('#msgs .msg.error'), function (e) { return e.textContent; }).join(' | '));
+          /* \u699f\u773c\u5bbd\u5ea6 = t + fit: \u8fd9\u624d\u662f"\u771f\u7684\u80fd\u5207\u51fa\u6765"\u7684\u786c\u6307\u6807 */
+          var holed = st.result.parts.filter(function (q) { return q.holes.length; })[0];
+          if (holed) {
+            var bb = w.G.loopBBox(holed.holes[0]);
+            var narrow = Math.min(bb.w, bb.h);
+            chk('\u677f\u539a ' + v + ': \u699f\u773c\u77ed\u8fb9 \u2248 t+fit',
+              Math.abs(narrow - (v + p.fit)) < 0.05, narrow + ' vs ' + (v + p.fit));
+          }
+        });
+        /* chip \u9ad8\u4eae\u8ddf\u968f: \u975e\u5e38\u7528\u503c\u65f6\u5168\u4e0d\u9ad8\u4eae, \u5e38\u7528\u503c\u65f6\u53ea\u9ad8\u4eae\u5bf9\u5e94\u7684\u90a3\u4e2a */
+        setT(16.5);
+        chk('\u677f\u539a: \u975e\u5e38\u7528\u503c\u65f6\u65e0 chip \u9ad8\u4eae', d.querySelectorAll('#thickChips .chip.on').length === 0);
+        setT(18);
+        chk('\u677f\u539a: \u5e38\u7528\u503c\u65f6\u9ad8\u4eae\u5bf9\u5e94 chip',
+          d.querySelectorAll('#thickChips .chip.on').length === 1 &&
+          d.querySelector('#thickChips .chip.on').dataset.t === '18',
+          d.querySelector('#thickChips .chip.on') ? d.querySelector('#thickChips .chip.on').dataset.t : 'none');
+        /* \u70b9 chip \u53cd\u5411\u5199\u56de\u8f93\u5165\u6846 */
+        d.querySelectorAll('#thickChips .chip')[0].click();
+        chk('\u677f\u539a: \u70b9 chip \u56de\u586b\u8f93\u5165\u6846', ti.value === '9' && Math.abs(w.__app.thicknessOf() - 9) < 1e-9, ti.value);
+        chk('\u677f\u539a: \u70b9 chip \u4e5f\u91cd\u65b0\u751f\u6210',
+          st.result.parts.every(function (q) { return Math.abs(q.thickness - 9) < 1e-9; }));
+
+        /* \u975e\u6cd5\u8f93\u5165\u7684\u517c\u5bb9: \u7a7a / 0 / \u8d1f\u6570 / \u8fc7\u5927 \u2014\u2014 \u90fd\u4e0d\u5f97\u628a t \u641e\u6210 0 */
+        setT('');
+        chk('\u677f\u539a: \u7a7a\u4e32\u964d\u7ea7\u4e3a 15', Math.abs(w.__app.thicknessOf() - 15) < 1e-9, w.__app.thicknessOf());
+        chk('\u677f\u539a: \u7a7a\u4e32\u65f6\u6709\u8b66\u544a\u63d0\u793a', d.getElementById('thickHint').className.indexOf('warnHint') >= 0,
+          d.getElementById('thickHint').className);
+        setT(0);
+        chk('\u677f\u539a: 0 \u964d\u7ea7\u4e3a 15(\u4e0d\u80fd\u8ba9\u699f\u5bbd\u5168\u53d8 0)', Math.abs(w.__app.thicknessOf() - 15) < 1e-9);
+        setT(-5);
+        chk('\u677f\u539a: \u8d1f\u6570\u964d\u7ea7\u4e3a 15', Math.abs(w.__app.thicknessOf() - 15) < 1e-9);
+        setT(500);
+        chk('\u677f\u539a: \u8fc7\u5927\u88ab\u5939\u5230 60', Math.abs(w.__app.thicknessOf() - 60) < 1e-9, w.__app.thicknessOf());
+        chk('\u677f\u539a: \u5939\u4f4f\u65f6\u544a\u77e5\u7528\u6237', d.getElementById('thickHint').className.indexOf('warnHint') >= 0);
+        setT(1);
+        chk('\u677f\u539a: \u8fc7\u5c0f\u88ab\u5939\u5230 3', Math.abs(w.__app.thicknessOf() - 3) < 1e-9, w.__app.thicknessOf());
+        setT(15);
+        chk('\u677f\u539a: \u6062\u590d 15 \u540e\u63d0\u793a\u8f6c\u56de\u6b63\u5e38',
+          d.getElementById('thickHint').className === 'hint', d.getElementById('thickHint').className);
+
+        /* \u540e\u53d1\u73b0\u7684\u771f BUG: backInset \u9ed8\u8ba4 15, \u628a\u677f\u539a\u6539\u5230 30 \u65f6
+         * \u80cc\u677f\u699f\u773c(\u5bbd 30.2) \u4ee5 y=15 \u4e3a\u4e2d\u5fc3 -> \u8de8 -0.1..30.1 -> 8 \u6761"\u5b54\u8d8a\u51fa\u677f\u8fb9"\u3002 */
+        [26, 28, 30, 36, 45, 60].forEach(function (v) {
+          setT(v);
+          var pe = 0;
+          st.result.parts.forEach(function (q) { q.validate().forEach(function (m) { if (m.level === 'error') pe++; }); });
+          chk('\u539a\u677f t=' + v + ': \u96f6\u4ef6\u65e0\u975e\u6cd5(\u80cc\u677f\u5185\u7f29\u5df2\u81ea\u52a8\u5939\u4f4f)', pe === 0, pe);
+          chk('\u539a\u677f t=' + v + ': \u65e0 error \u6d88\u606f', d.querySelectorAll('#msgs .msg.error').length === 0,
+            Array.prototype.map.call(d.querySelectorAll('#msgs .msg.error'), function (e) { return e.textContent; }).join(' | '));
+        });
+        setT(30);
+        chk('\u539a\u677f: \u80cc\u677f\u5185\u7f29\u88ab\u5939\u4f4f\u65f6\u7ed9\u4e86 warn(\u4e0d\u662f\u9ed8\u9ed8\u6539)',
+          (st.result.warnings || []).some(function (m) { return /\u80cc\u677f\u5185\u7f29/.test(m.text); }),
+          (st.result.warnings || []).map(function (m) { return m.text; }).join(' | '));
+
+        /* \u5176\u4ed6\u6a21\u578b\u4e5f\u5f97\u6263\u4f4f\u4efb\u610f\u677f\u539a */
+        ['bookshelf', 'drawer', 'table', 'lattice'].forEach(function (mk) {
+          w.__app.selectModel(mk);
+          setT(16.5);
+          var pe = 0;
+          st.result.parts.forEach(function (q) { q.validate().forEach(function (m) { if (m.level === 'error') pe++; }); });
+          chk(mk + ' @16.5mm: \u96f6\u4ef6\u5408\u6cd5\u4e14\u539a\u5ea6\u6b63\u786e',
+            pe === 0 && st.result.parts.every(function (q) { return Math.abs(q.thickness - 16.5) < 1e-9; }), pe);
+        });
+        /* \u6a21\u677f/\u81ea\u5b9a\u4e49\u8def\u5f84\u4e5f\u8981\u62ff\u5230\u975e\u6574\u677f\u539a */
+        w.__app.selectModel('custom');
+        setT(16.5);
+        w.__app.setCmode('recipe');
+        chk('\u914d\u65b9 @16.5mm: \u5c55\u5f00\u7684\u677f\u539a\u5c31\u662f 16.5',
+          st.result.parts.every(function (q) { return Math.abs(q.thickness - 16.5) < 1e-9; }),
+          st.result.parts.map(function (q) { return q.thickness; }).join(','));
+        var pe2 = 0;
+        st.result.parts.forEach(function (q) { q.validate().forEach(function (m) { if (m.level === 'error') pe2++; }); });
+        chk('\u914d\u65b9 @16.5mm: \u96f6\u4ef6\u5408\u6cd5', pe2 === 0, pe2);
+        /* \u677f\u4f4d\u8868\u7684\u4e16\u754c\u76d2\u4e5f\u8981\u7528\u65b0\u677f\u539a */
+        w.__app.setCmode('panels');
+        st.panels = w.Custom.recipePanels('grid', { thickness: 16.5, width: 600, depth: 300, height: 720, dividers: [300], shelvesPerBay: [1, 1] });
+        w.__app.generate(); w.Editor.render();
+        var vb = w.Custom.panelBox(st.panels.filter(function (p) { return p.plane === 'XY'; })[0], 16.5);
+        chk('\u677f\u4f4d\u8868 @16.5mm: \u539a\u5ea6\u8f74\u957f\u5ea6 = 16.5', Math.abs(vb.h - 16.5) < 1e-9, vb.h);
+        /* \u5b9e\u6d4b\u677f\u539a\u4ecd\u80fd\u8986\u76d6\u6807\u79f0\u503c */
+        w.__app.selectModel('box');
+        setT(18);
+        d.getElementById('realThickness').value = '17.4';
+        d.getElementById('realThickness').dispatchEvent(new w.Event('change', { bubbles: true }));
+        var pr2 = w.__app.readParams();
+        chk('\u5b9e\u6d4b\u677f\u539a: \u4ecd\u4f18\u5148\u4e8e\u6807\u79f0\u503c',
+          Math.abs(pr2.thickness - 17.4) < 1e-9 && pr2.nominalThickness === 18 && pr2.thicknessMeasured === true,
+          JSON.stringify([pr2.thickness, pr2.nominalThickness]));
+        d.getElementById('realThickness').value = '0';
+        d.getElementById('realThickness').dispatchEvent(new w.Event('change', { bubbles: true }));
+        setT(15);
+      })();
+
+      w.__app.selectModel('box');
+      chk('back to box hides img sec', d.getElementById('imgSec').style.display === 'none' &&
+        d.getElementById('tabImg').style.display === 'none');
+      chk('back to box regenerates', w.__app.state.result.parts.length > 0, w.__app.state.result.parts.length);
+
+      /* ================= 导出路径选择 =================
+       * File System Access API 在 file:// + headless 下基本不可用(就算
+       * window.showSaveFilePicker 存在, 一调也直接抛 SecurityError, 而且
+       * 根本弹不出对话框让人点)。所以这里一律用 stub 注入句柄,
+       * 改而死死盯住我们自己的分支逻辑: 成功 / 取消 / 硬错降级 /
+       * 目录写入 / 句柄失效。这五条里只要有一条错, 用户就会遇到
+       * "点了导出但东西不知道去哪了"。 */
+      tail = (function () {
+        var A = w.__app, D = w.document;
+        var realSave = w.showSaveFilePicker, realDir = w.showDirectoryPicker;
+        A.selectModel('custom');
+        A.setCmode('recipe');
+        var tasks = A.exportTasks();
+        chk('导出[任务表]: 6 个导出项', tasks.length === 6, tasks.map(function (t) { return t.key; }).join(','));
+        /* 后缀必须对 —— 名字里的后缀既决定了另存为对话框的类型过滤器,
+         * 也决定了写进文件夹后 CAM 软件能不能认出来。 */
+        chk('导出[任务表]: 后缀逐个对得上',
+          tasks.map(function (t) { return (/\.([a-z]+)$/.exec(t.name()) || [])[1]; }).join(',') === 'dxf,dxf,svg,csv,csv,json',
+          tasks.map(function (t) { return t.name(); }).join(' | '));
+        chk('导出[任务表]: 文件名带时间戳(不会互相覆盖)',
+          tasks.every(function (t) { return /-\d{8}-\d{4}\./.test(t.name()); }), tasks[0].name());
+        chk('导出[任务表]: 有零件时 6 项全部可导',
+          tasks.every(function (t) { return t.ready() === ''; }),
+          tasks.map(function (t) { return t.key + '=' + (t.ready() || 'OK'); }).join(' | '));
+        chk('导出[任务表]: 每项真能算出非空内容',
+          tasks.every(function (t) { return t.text().length > 40; }),
+          tasks.map(function (t) { return t.key + ':' + t.text().length; }).join(' '));
+
+        var got = [];
+        function stubOK() {
+          w.showSaveFilePicker = function (o) {
+            var rec = { args: o };
+            got.push(rec);
+            return Promise.resolve({
+              createWritable: function () {
+                return Promise.resolve({
+                  write: function (b) { rec.size = b.size; rec.type = b.type; return Promise.resolve(); },
+                  close: function () { return Promise.resolve(); }
+                });
+              }
+            });
+          };
+        }
+        A.EXP.dir = null; A.EXP.dirName = '';
+        D.getElementById('askSave').checked = true;
+        stubOK();
+        A.syncExpPath();
+        chk('导出[提示]: 默认文案说清楚会弹另存为',
+          /另存为/.test(D.getElementById('expPathVal').textContent), D.getElementById('expPathVal').textContent);
+        chk('导出[提示]: 未选文件夹时“清除”置灰', D.getElementById('btnClearDir').disabled);
+
+        return A.saveFile('t.dxf', '0\nSECTION\n0\nEOF\n', 'image/vnd.dxf').then(function (r) {
+          chk('导出[另存为]: 走 picker 分支', r.how === 'picker', r.how);
+          chk('导出[另存为]: 预填文件名就是我们给的', got[0].args.suggestedName === 't.dxf', got[0].args.suggestedName);
+          /* 不给 types 的话 Chrome 会把 ".dxf" 当普通字符,
+           * 用户一不小心就存成无后缀文件, CAM 软件根本打不开。 */
+          chk('导出[另存为]: 带上了类型过滤器(免得存成无后缀)',
+            !!got[0].args.types && !!got[0].args.types[0].accept['image/vnd.dxf'],
+            JSON.stringify(got[0].args.types));
+          chk('导出[另存为]: 内容真的写进去了', got[0].size > 0 && got[0].type === 'image/vnd.dxf',
+            got[0].size + ' ' + got[0].type);
+          /* 用户点取消是正常操作: 不能报错, 也绝不能偷偷降级成下载
+           * (用户刚明确说了不存, 结果东西落到下载目录 = 比报错更坏) */
+          w.showSaveFilePicker = function () { var e = new Error('x'); e.name = 'AbortError'; return Promise.reject(e); };
+          return A.saveFile('t.csv', 'a,b\n1,2\n', 'text/csv');
+        }).then(function (r) {
+          chk('导出[取消]: AbortError 返回 cancel 而不是报错', r.how === 'cancel', r.how);
+          A.reportSave(r);
+          chk('导出[取消]: 提示是 info 级不是错误',
+            !/✕/.test(D.getElementById('msgs').textContent) && /取消/.test(D.getElementById('msgs').textContent),
+            D.getElementById('msgs').textContent.slice(0, 60));
+          // 非取消类硬错 → 必须降级成下载, 而不是什么都不发生
+          w.showSaveFilePicker = function () { var e = new Error('boom'); e.name = 'SecurityError'; return Promise.reject(e); };
+          return A.saveFile('t.svg', '<svg/>', 'image/svg+xml');
+        }).then(function (r) {
+          chk('导出[硬错]: 降级成默认下载(不能静默失败)',
+            r.how === 'download' && r.err && r.err.name === 'SecurityError', r.how + '/' + (r.err && r.err.name));
+          /* 关掉"每次问" → 就该直走下载, 不得再碰 picker */
+          var touched = 0;
+          w.showSaveFilePicker = function () { touched++; return Promise.reject(new Error('should not be called')); };
+          D.getElementById('askSave').checked = false;
+          A.syncExpPath();
+          chk('导出[提示]: 关掉每次问后文案改成默认目录',
+            /默认下载目录/.test(D.getElementById('expPathVal').textContent),
+            D.getElementById('expPathVal').textContent);
+          return A.saveFile('t2.csv', 'a\n', 'text/csv').then(function (r2) {
+            chk('导出[默认]: 不勾每次问时压根不碰 picker',
+              r2.how === 'download' && touched === 0, r2.how + ' touched=' + touched);
+          });
+        }).then(function () {
+          /* ---- 没选文件夹时的“导出全部”不得连弹 6 次另存为 ----
+           * 浏览器只允许一个用户手势弹一个文件对话框,
+           * 并发/连续弹第二个开始会直接 NotAllowedError ——
+           * 那就成了"点了导全部只得到一个文件"。所以这档必须直走下载。 */
+          var picked = 0;
+          w.showSaveFilePicker = function () { picked++; var e = new Error('x'); e.name = 'NotAllowedError'; return Promise.reject(e); };
+          D.getElementById('askSave').checked = true;
+          A.EXP.dir = null; A.EXP.dirName = '';
+          A.syncExpPath();
+          return A.exportAll().then(function (out) {
+            chk('导出[全部]: 没选文件夹时直走下载(不连弹 6 次另存为)',
+              picked === 0 && out.length === 6 && out.every(function (r) { return r.how === 'download'; }),
+              'picked=' + picked + ' ' + out.map(function (r) { return r.how; }).join(','));
+            chk('导出[全部]: 汇总文案说明落在默认目录',
+              /默认下载目录/.test(D.getElementById('msgs').textContent),
+              D.getElementById('msgs').textContent.slice(0, 60));
+          });
+        }).then(function () {
+          /* ---- 文件夹直写: 一键导 6 个不弹框 ---- */
+          var files = {};
+          A.EXP.dir = {
+            name: 'OutDir',
+            getFileHandle: function (n) {
+              return Promise.resolve({
+                createWritable: function () {
+                  return Promise.resolve({
+                    write: function (b) { files[n] = b.size; return Promise.resolve(); },
+                    close: function () { return Promise.resolve(); }
+                  });
+                }
+              });
+            }
+          };
+          A.EXP.dirName = 'OutDir';
+          A.syncExpPath();
+          chk('导出[文件夹]: 文案报出文件夹名',
+            /OutDir/.test(D.getElementById('expPathVal').textContent), D.getElementById('expPathVal').textContent);
+          /* 选定文件夹后"每次问"就不生效了 → 必须置灰,
+           * 否则留个勾了没反应的框比什么都不做更坑人。 */
+          chk('导出[文件夹]: “每次问”自动置灰', D.getElementById('askSave').disabled);
+          chk('导出[文件夹]: “清除”可点了', !D.getElementById('btnClearDir').disabled);
+          return A.exportAll().then(function (out) {
+            chk('导出[全部]: 6 个全写进文件夹',
+              out.length === 6 && out.every(function (r) { return r.how === 'dir'; }),
+              out.map(function (r) { return r.how; }).join(','));
+            chk('导出[全部]: 文件夹里真的落了 6 个非空文件',
+              Object.keys(files).length === 6 && Object.keys(files).every(function (k) { return files[k] > 0; }),
+              JSON.stringify(files));
+            chk('导出[全部]: 汇总消息报出成功个数 + 落点',
+              /6/.test(D.getElementById('msgs').textContent) && /OutDir/.test(D.getElementById('msgs').textContent),
+              D.getElementById('msgs').textContent.slice(0, 80));
+          });
+        }).then(function () {
+          /* ---- 句柄失效(目录被删/权限过期) ----
+           * 必须把死句柄丢掉 + 降级下载 + 报一句,
+           * 否则用户下次还拿着死句柄再失败一次, 而且以为存进去了。 */
+          A.EXP.dir = { name: 'Gone', getFileHandle: function () { var e = new Error('gone'); e.name = 'NotFoundError'; return Promise.reject(e); } };
+          A.EXP.dirName = 'Gone';
+          return A.saveFile('t3.dxf', '0\nEOF\n', 'image/vnd.dxf');
+        }).then(function (r) {
+          chk('导出[句柄失效]: 降级下载', r.how === 'download', r.how);
+          chk('导出[句柄失效]: 死句柄被丢掉(不会一直失败下去)', A.EXP.dir === null);
+          chk('导出[句柄失效]: 提示请用户重新选',
+            /重新选择文件夹/.test(D.getElementById('msgs').textContent),
+            D.getElementById('msgs').textContent.slice(0, 90));
+          /* ---- 不支持 API 的环境(Firefox/Safari) 不能变成导不了 ---- */
+          delete w.showSaveFilePicker;
+          delete w.showDirectoryPicker;
+          D.getElementById('askSave').checked = true;
+          A.syncExpPath();
+          chk('导出[降级]: 不支持时“选文件夹”置灰且 title 说清原因',
+            D.getElementById('btnPickDir').disabled && /不支持/.test(D.getElementById('btnPickDir').title),
+            D.getElementById('btnPickDir').title);
+          chk('导出[降级]: 文案告知会落在默认目录',
+            /不支持选路径/.test(D.getElementById('expPathVal').textContent),
+            D.getElementById('expPathVal').textContent);
+          return A.saveFile('t4.json', '{}', 'application/json');
+        }).then(function (r) {
+          chk('导出[降级]: 仍能导出(走 <a download>)', r.how === 'download', r.how);
+          return A.pickExportDir();
+        }).then(function (h) {
+          chk('导出[降级]: 点选文件夹不崩, 只提示',
+            h === null && /不支持/.test(D.getElementById('msgs').textContent),
+            D.getElementById('msgs').textContent.slice(0, 60));
+          /* ---- 零零件时的护栏: 不能导出一堆空文件 ---- */
+          A.setCmode('panels');
+          var keep = A.state.panels;
+          A.state.panels = [];
+          A.generate();
+          var tk = A.exportTasks();
+          var whys = {};
+          tk.forEach(function (t) { whys[t.key] = t.ready(); });
+          chk('导出[零零件]: DXF/SVG/CSV 全部拦住并说明原因',
+            !!whys.dxfNest && !!whys.dxfParts && !!whys.svg && !!whys.csv && !!whys.featCsv,
+            JSON.stringify(whys));
+          /* 参数 JSON 则应该仍能导 —— 用户可能就想存一份现场参数去问人 */
+          chk('导出[零零件]: 参数 JSON 仍可导且带自定义数据',
+            whys.json === '' && /"custom"/.test(tk[5].text()), whys.json + ' / ' + tk[5].text().length);
+          return A.exportAll().then(function (out) {
+            chk('导出[零零件]: 全部导出只落 JSON, 其余跳过',
+              out.filter(function (r) { return r.how === 'skip'; }).length === 5 &&
+              out.filter(function (r) { return r.how === 'download'; }).length === 1,
+              out.map(function (r) { return r.how; }).join(','));
+            A.state.panels = keep;
+            A.generate();
+          });
+        }).then(function () {
+          // 环境复原, 免得污染后续(尽管这是最后一节)
+          if (realSave) w.showSaveFilePicker = realSave;
+          if (realDir) w.showDirectoryPicker = realDir;
+          A.EXP.dir = null; A.EXP.dirName = '';
+          A.syncExpPath();
+        });
+      })();
+    } catch (e) {
+      chk('exception', false, e.message + ' @ ' + (e.stack || '').split('\n')[1]);
+    }
+    tail.then(done, function (e) {
+      chk('导出异步异常', false, e && (e.message + ' @ ' + (e.stack || '').split('\n')[1]));
+      done();
+    });
+  }, 1200);
+};
+</script>

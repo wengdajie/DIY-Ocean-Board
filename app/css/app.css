@@ -1,0 +1,389 @@
+/* ============================================================
+ * 暖白（warm white）主题
+ *   底色带一点米黄, 呼应海洋板本身的木色, 长时间看不刺眼;
+ *   主色用偏暖的琥珀棕做强调, 蓝留给"零件/图纸"这类工程语义。
+ * ============================================================ */
+:root {
+  --bg: #f7f3ea;          /* 画布底 / 舞台 */
+  --panel: #fffdf8;       /* 侧栏 / 头部 */
+  --panel2: #f1ebdd;      /* 输入框 / 表头 / 次级块 */
+  --panel3: #e9e1cf;      /* 更深一档(斑马纹 / 子表头) */
+  --line: #ddd3bf;        /* 分隔线 */
+  --line2: #c9bda3;       /* 强调分隔线 */
+  --fg: #3a332a;          /* 正文 */
+  --fg2: #1f1b15;         /* 标题 / 强调 */
+  --dim: #6b6152;         /* 次要文字 */
+  --acc: #96651f;         /* 主强调: 琥珀棕。作实心底时上面压 --acc-ink,
+                             所以必须够深(当前 4.94:1, 过 WCAG AA) */
+  --acc-soft: #f3e3c6;    /* 主强调的浅底 */
+  --acc-ink: #fffdf8;     /* 主强调上的文字 */
+  --acc2: #26805e;        /* 成功 / 通过 (块面色, 上面压白字 4.85:1) */
+  --acc2-soft: #dcefe5;
+  --acc2-ink: #1a6647;    /* 成功色当**文字**时用这个: 浅底上 5.7:1, 过 WCAG AA */
+  --warn: #b8791c;
+  --warn-soft: #fbecd2;
+  --err: #c0453c;         /* 错误 (块面色) */
+  --err-soft: #fadfdc;
+  --err-ink: #9e3730;     /* 错误色当**文字**时用这个: 斜纹行/深一档底上仍 >5:1 */
+  --sel: #d98a1f;         /* 选中(与三视图橙一致) */
+  --sel-soft: #fbeacd;
+  --sheet: #f7f4ec;
+  --part: #2f6bb0;
+  --shadow: 0 1px 2px rgba(60,48,30,.07);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg); color: var(--fg);
+  display: flex; flex-direction: column; overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; color: var(--fg2); }
+header .tag {
+  font-size: 11px; color: var(--dim); border: 1px solid var(--line);
+  padding: 1px 6px; border-radius: 10px; background: var(--panel2);
+}
+header .spacer { flex: 1; }
+
+main { flex: 1; display: flex; min-height: 0; }
+
+/* ---------- 左侧参数栏 ---------- */
+#side {
+  width: 320px; flex: 0 0 320px; background: var(--panel);
+  border-right: 1px solid var(--line); overflow-y: auto; padding: 12px;
+}
+#side h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+  color: var(--dim); margin: 16px 0 8px; font-weight: 600;
+}
+#side h2:first-child { margin-top: 0; }
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.row label { flex: 1; color: var(--dim); font-size: 12px; }
+.row input[type=number], .row input[type=text], .row select {
+  width: 104px; flex: 0 0 104px; background: #fff; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 5px; padding: 4px 7px; font: inherit;
+}
+.row input[type=range] { width: 104px; flex: 0 0 104px; accent-color: var(--acc); }
+.row input:focus, .row select:focus {
+  outline: none; border-color: var(--acc); box-shadow: 0 0 0 2px var(--acc-soft);
+}
+.row .unit { color: var(--dim); font-size: 11px; width: 22px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip {
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: 14px;
+  background: #fff; color: var(--dim); cursor: pointer; font-size: 12px; user-select: none;
+}
+.chip:hover { border-color: var(--acc); color: var(--fg2); background: var(--acc-soft); }
+.chip.on { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
+/* 板厚快捷 chip: 比主导航 chip 小一号, 不抢输入框的风头 */
+#thickChips { display: flex; flex-wrap: wrap; gap: 4px; }
+#thickChips .chip.tk { padding: 2px 8px; border-radius: 10px; font-size: 11px; min-width: 24px; text-align: center; }
+.row.tRow label { color: var(--dim); font-size: 11px; }
+.hint.warnHint {
+  color: #8d2d26; background: var(--err-soft); border: 1px solid #e0bdb9;
+  border-radius: 5px; padding: 4px 7px;
+}
+button {
+  font: inherit; cursor: pointer; border-radius: 6px; border: 1px solid var(--line);
+  background: #fff; color: var(--fg); padding: 7px 12px; box-shadow: var(--shadow);
+}
+button:hover { border-color: var(--acc); color: var(--fg2); background: var(--acc-soft); }
+button:active { transform: translateY(1px); }
+button.primary { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
+button.primary:hover { background: #7f5416; border-color: #7f5416; color: var(--acc-ink); }
+button.ok { background: var(--acc2); border-color: var(--acc2); color: #fff; font-weight: 600; }
+button.ok:hover { background: #1f6f50; border-color: #1f6f50; color: #fff; }
+.btns { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.btns button { flex: 1 1 auto; }
+
+/* ---------- 右侧视图 ---------- */
+#view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#tabs { display: flex; gap: 2px; padding: 8px 12px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tab {
+  padding: 7px 15px; cursor: pointer; color: var(--dim); font-size: 12px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0;
+}
+.tab:hover { color: var(--fg); }
+.tab:hover { color: var(--fg2); background: var(--acc-soft); }
+.tab.on {
+  background: var(--bg); color: var(--fg2); border-color: var(--line);
+  font-weight: 600; box-shadow: inset 0 2px 0 var(--acc);
+}
+#stage { flex: 1; position: relative; min-height: 0; background: var(--bg); }
+.pane { position: absolute; inset: 0; display: none; }
+.pane.on { display: block; }
+canvas { display: block; width: 100%; height: 100%; }
+#hud {
+  position: absolute; left: 12px; bottom: 12px; font-size: 11px; color: var(--dim);
+  background: rgba(255,253,248,.92); padding: 5px 9px; border-radius: 5px; border: 1px solid var(--line);
+  pointer-events: none; white-space: pre; box-shadow: var(--shadow);
+}
+#legend {
+  position: absolute; right: 12px; top: 12px; font-size: 11px; color: var(--dim);
+  background: rgba(255,253,248,.92); padding: 7px 10px; border-radius: 5px; border: 1px solid var(--line);
+  pointer-events: none; box-shadow: var(--shadow);
+}
+#legend i { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 2px; vertical-align: -1px; }
+
+/* ---------- 清单表 ---------- */
+#listPane { overflow: auto; padding: 14px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: right; }
+th { background: var(--panel2); color: var(--dim); font-weight: 600; text-align: center; position: sticky; top: 0; }
+td:nth-child(2), td:last-child { text-align: left; }
+tbody tr:nth-child(even) { background: rgba(233,225,207,.38); }
+tbody tr:hover { background: var(--acc-soft); }
+tfoot td { background: var(--panel3); font-weight: 600; color: var(--fg2); }
+
+/* ---------- 提示 ---------- */
+#msgs { padding: 8px 12px 0; }
+.msg { font-size: 12px; padding: 5px 9px; border-radius: 5px; margin-bottom: 5px; border-left: 3px solid; }
+.msg.error { background: var(--err-soft); border-color: var(--err); color: #8d2d26; }
+.msg.warn { background: var(--warn-soft); border-color: var(--warn); color: #7a4e0d; }
+.msg.info { background: var(--acc-soft); border-color: var(--acc); color: #6d4913; }
+.stat { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--dim); padding: 8px 12px 0; }
+.stat b { color: var(--fg2); font-weight: 600; }
+.hint { font-size: 11px; color: var(--dim); margin: -3px 0 9px; line-height: 1.5; }
+
+/* ---------- 图片上传 / 自定义 ---------- */
+#drop {
+  border: 1.5px dashed var(--line); border-radius: 8px; padding: 16px 10px;
+  text-align: center; color: var(--dim); cursor: pointer; margin-bottom: 9px;
+  transition: border-color .15s, background .15s; user-select: none;
+}
+#drop { background: #fff; }
+#drop b { color: var(--fg2); font-size: 13px; }
+#drop span { font-size: 11px; }
+#drop:hover, #drop.hot { border-color: var(--acc); background: var(--acc-soft); }
+#drop.has { border-style: solid; border-color: var(--acc2); background: var(--acc2-soft); }
+.row .val { flex: 0 0 104px; font-size: 11px; color: var(--fg2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row label .val { color: var(--fg2); }
+textarea {
+  width: 100%; background: #fff; color: var(--fg); border: 1px solid var(--line);
+  border-radius: 5px; padding: 6px 8px; font: 11px/1.45 ui-monospace, Consolas, monospace;
+  resize: vertical; margin-bottom: 7px;
+}
+textarea:focus { outline: none; border-color: var(--acc); box-shadow: 0 0 0 2px var(--acc-soft); }
+code {
+  font: 11px ui-monospace, Consolas, monospace; background: var(--panel2);
+  padding: 0 3px; border-radius: 3px; color: var(--fg2);
+}
+#imgTools {
+  position: absolute; right: 12px; top: 12px; display: flex; gap: 5px;
+  background: rgba(255,253,248,.94); padding: 6px; border-radius: 6px;
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+#imgTools .chip { font-size: 11px; padding: 3px 8px; }
+
+/* ---------- 3D 装配页的浮层 ---------- */
+#hud2 {
+  position: absolute; left: 12px; bottom: 12px; font-size: 11px; line-height: 1.7;
+  color: var(--dim); background: rgba(255,253,248,.93); padding: 5px 9px;
+  border-radius: 5px; border: 1px solid var(--line); pointer-events: none;
+  box-shadow: var(--shadow); max-width: 62%;
+}
+#hud2 b { color: var(--fg2); font-size: 12px; }
+#hud2 i { color: var(--acc); font-style: normal; }
+#asmTools {
+  position: absolute; right: 12px; top: 12px; display: flex; align-items: center; gap: 5px;
+  background: rgba(255,253,248,.94); padding: 6px; border-radius: 6px;
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+#asmTools .chip { font-size: 11px; padding: 3px 8px; }
+#asmTools .sepv { width: 1px; align-self: stretch; background: var(--line); margin: 0 3px; }
+#asmTools .expLab { font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 5px; }
+#asmTools input[type=range] { width: 76px; accent-color: var(--acc); }
+
+/* ---------- 清单 / 板位编辑器 ---------- */
+#editPane { display: none; flex-direction: column; overflow: hidden; background: var(--bg); }
+#editPane.on { display: flex; }
+#editBar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+#editBar .lbl { font-size: 12px; color: var(--dim); }
+#editBar button { padding: 5px 10px; font-size: 12px; }
+#editBar .sep { flex: 1; }
+#editGrid { flex: 1 1 auto; overflow: auto; min-height: 0; padding: 0 0 6px; background: var(--bg); }
+
+/* 表格上方的"怎么读这张表"说明 */
+#editGrid .gridLead {
+  margin: 10px 12px; padding: 8px 11px; font-size: 12px; line-height: 1.6;
+  color: var(--dim); background: var(--acc-soft); border: 1px solid var(--line);
+  border-left: 3px solid var(--acc); border-radius: 5px;
+}
+#editGrid .gridLead b { color: #6d4913; }
+
+#editGrid table { border-collapse: separate; border-spacing: 0; min-width: 100%; background: var(--panel); }
+#editGrid th {
+  position: sticky; z-index: 2; background: var(--panel2); color: var(--dim);
+  font-size: 11px; font-weight: 600; text-align: center; white-space: nowrap;
+  padding: 6px 6px; border-bottom: 1px solid var(--line);
+}
+/* 两行表头: 上行分组(位置/尺寸), 下行具体列 */
+#editGrid thead tr.grouphead th {
+  top: 0; background: var(--panel3); color: var(--fg2);
+  font-size: 11px; letter-spacing: .3px; padding: 5px 6px;
+  border-bottom: 1px solid var(--line);
+}
+#editGrid thead tr.grouphead th.grp1 { border-left: 1px solid var(--line2); }
+#editGrid thead tr.grouphead th.grp0 { background: var(--panel2); }
+#editGrid thead tr:last-child th { top: 27px; }
+#editGrid th.sepL, #editGrid td.sepL { border-left: 1px solid var(--line2); }
+
+#editGrid td {
+  padding: 2px 4px; border-bottom: 1px solid var(--line); text-align: center;
+  white-space: nowrap; font-size: 12px;
+}
+#editGrid tbody tr:nth-child(even) > td { background: rgba(233,225,207,.30); }
+#editGrid tbody tr:hover > td { background: var(--acc-soft); }
+#editGrid tr.sel > td { background: var(--sel-soft) !important; }
+#editGrid tr.sel > td:first-child { box-shadow: inset 3px 0 0 var(--sel); }
+#editGrid tr.off > td { opacity: .45; }
+#editGrid input[type=text], #editGrid input[type=number], #editGrid select {
+  background: #fff; color: var(--fg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 3px 5px; font: inherit; font-size: 12px; width: 74px;
+}
+#editGrid input.wide { width: 116px; }
+#editGrid input.narrow { width: 54px; }
+/* 板厚方向那一格: 由板厚决定, 不给改 */
+#editGrid input.lock {
+  background: var(--panel3); color: var(--dim); border-style: dashed; cursor: not-allowed;
+}
+#editGrid input:focus, #editGrid select:focus {
+  outline: none; border-color: var(--acc); box-shadow: 0 0 0 2px var(--acc-soft);
+}
+#editGrid select { width: 84px; }
+#editGrid select.wide { width: 152px; }
+#editGrid td.thick { color: var(--dim); }
+/* 表很宽(21 列), 小屏上必然要横滚。把"操作"列钉在右边缘,
+ * 否则想删一块板得先把表拉到最右。同理把"选中/板名"钉在左边缘,
+ * 横滚时不会不知道在改哪一行。 */
+#editGrid td.act { white-space: nowrap; }
+#editGrid th.stickR, #editGrid td.act {
+  position: sticky; right: 0; z-index: 3;
+  box-shadow: -3px 0 5px -3px rgba(60,48,30,.18);
+}
+#editGrid td.act { background: var(--panel); }
+#editGrid tbody tr:nth-child(even) > td.act { background: #f7f2e6; }
+#editGrid tbody tr:hover > td.act { background: var(--acc-soft); }
+#editGrid tr.sel > td.act { background: var(--sel-soft) !important; }
+#editGrid th.stickR { z-index: 4; }
+#editGrid th.stickL, #editGrid td.stickL {
+  position: sticky; left: 0; z-index: 3;
+  box-shadow: 3px 0 5px -3px rgba(60,48,30,.18);
+}
+#editGrid td.stickL { background: var(--panel); }
+#editGrid tbody tr:nth-child(even) > td.stickL { background: #f7f2e6; }
+#editGrid tbody tr:hover > td.stickL { background: var(--acc-soft); }
+#editGrid tr.sel > td.stickL { background: var(--sel-soft) !important; }
+#editGrid th.stickL { z-index: 4; }
+#editGrid button.mini {
+  padding: 2px 7px; font-size: 11px; border-radius: 4px; line-height: 1.4; box-shadow: none;
+}
+#editGrid button.mini.danger { color: var(--err-ink); border-color: #e0bdb9; }
+#editGrid button.mini.danger:hover { background: var(--err-soft); border-color: var(--err); color: #8d2d26; }
+#editGrid .grp { color: var(--dim); font-size: 11px; }
+#editGrid tr.subhead td {
+  text-align: left; background: var(--panel3); color: var(--fg2); font-size: 11px;
+  padding: 4px 10px; letter-spacing: .5px;
+}
+/* ---------- 对齐 / 等间距工具条 ---------- */
+#alignBar {
+  flex: 0 0 auto; display: none; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--panel2);
+}
+#alignBar .lbl { font-size: 11px; color: var(--dim); }
+#alignBar .agrp {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px 2px 4px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel);
+}
+#alignBar .atag {
+  font-size: 10px; color: var(--fg2); background: var(--panel3);
+  border-radius: 4px; padding: 2px 5px; letter-spacing: .5px;
+}
+#alignBar button.mini {
+  font-size: 11px; padding: 3px 7px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--panel); color: var(--fg2); cursor: pointer;
+}
+#alignBar button.mini:hover:not(:disabled) { border-color: var(--acc); background: var(--acc-soft); color: #7d5210; }
+/* 置灰按钮不能用 opacity 变淡: 淡到 1.7:1 后根本读不清,
+ * 而用户正需要读它才知道"原来还有这些对齐方式, 多选两块就能用"。
+ * 改成"背景变灰 + 文字仍达 AA", 既看得出不可点又读得清。
+ * 这条是像素探针掳到的: 八个置灰按钮全部 1.70 < 4.5。 */
+#alignBar button.mini:disabled,
+#alignBar button.mini.dist:disabled {
+  color: #5f5648; background: var(--panel3); border-color: var(--line);
+  cursor: not-allowed;
+}
+#alignBar button.mini.dist { border-color: #bcd6c9; color: var(--acc2-ink); }
+#alignBar button.mini.dist:hover:not(:disabled) { background: var(--acc2-soft); border-color: var(--acc2); color: #14543c; }
+#alignBar .alignMsg {
+  font-size: 11px; color: var(--acc2-ink); background: var(--acc2-soft);
+  border: 1px solid #bcd6c9; border-radius: 5px; padding: 2px 8px;
+}
+#planWrap {
+  flex: 0 0 44%; position: relative; border-top: 1px solid var(--line);
+  min-height: 150px; background: var(--bg);
+}
+#planHud {
+  position: absolute; left: 10px; bottom: 8px; font-size: 11px; color: var(--dim);
+  background: rgba(255,253,248,.92); padding: 4px 8px; border-radius: 5px;
+  border: 1px solid var(--line); pointer-events: none; box-shadow: var(--shadow);
+}
+#editGrid .emptyTip { padding: 26px 18px; color: var(--dim); font-size: 13px; text-align: center; }
+#editGrid .emptyTip b { color: var(--fg2); }
+.badge {
+  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 9px;
+  border: 1px solid var(--line); color: var(--dim); margin-left: 5px;
+}
+.badge.on { border-color: var(--acc2); color: var(--acc2-ink); background: var(--acc2-soft); }
+
+/* ---------- 拖拽分隔条 (可调面板大小) ---------- */
+/* 为什么不用 CSS resize: 它只能右下角拖, 而且拖完不会重绘 canvas
+ * (canvas 是 width:100%/height:100% + dpr 重设位图, 不重绘就是拉伸模糊)。
+ * 自己做分隔条才能在 pointerup 后调 draw()。 */
+.splitter {
+  position: relative; flex: 0 0 6px; background: var(--panel2);
+  border: 0; padding: 0; touch-action: none; z-index: 5;
+  transition: background .12s;
+}
+.splitter.vert { cursor: col-resize; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+.splitter.horz { cursor: row-resize; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+/* 命中区只有 6px 太难抓 → 用 ::after 向两侧各撑开 4px 的透明区 */
+.splitter::after {
+  content: ''; position: absolute; z-index: 1;
+}
+.splitter.vert::after { top: 0; bottom: 0; left: -4px; right: -4px; cursor: col-resize; }
+.splitter.horz::after { left: 0; right: 0; top: -4px; bottom: -4px; cursor: row-resize; }
+/* 拖柄纹: 不画图标, 用两条短线暗示"这里能拖" */
+.splitter::before {
+  content: ''; position: absolute; z-index: 2; background: var(--line2);
+  border-radius: 2px;
+}
+.splitter.vert::before { left: 2px; width: 2px; top: 50%; height: 34px; margin-top: -17px; }
+.splitter.horz::before { top: 2px; height: 2px; left: 50%; width: 34px; margin-left: -17px; }
+.splitter:hover { background: var(--acc-soft); }
+.splitter:hover::before, .splitter.dragging::before { background: var(--acc); }
+.splitter.dragging { background: var(--acc-soft); }
+.splitter:focus-visible { outline: 2px solid var(--acc); outline-offset: -1px; background: var(--acc-soft); }
+/* 拖动中整页锁游标/禁选中: 否则拖过表格时会把单元格文字刷成蓝底 */
+body.splitting { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+body.splitting.rowwise { cursor: row-resize; }
+body.splitting * { pointer-events: none; }
+/* 布局复位按钮(头部) */
+#btnLayoutReset { font-size: 11px; }
+
+/* ---------- 滚动条(暖色) ---------- */
+* { scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 5px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }

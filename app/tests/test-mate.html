@@ -1,0 +1,339 @@
+<!doctype html><meta charset="utf-8"><body><pre id="out">x</pre>
+<script src="../js/geom.js"></script><script src="../js/joints.js"></script>
+<script src="../js/part.js"></script><script src="../js/models.js"></script><script src="../js/nest.js"></script><script src="../js/render.js"></script>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+
+/* ---- 稳健的边缘轮廓测量: 用扫描线判断材料是否越过基准线 ----
+ * axis: 'x' | 'y' 为凸出方向轴; baseVal 为板边基准; dir=+1/-1 为凸出正负向
+ * uAxis: 沿边长方向的轴; [uMin,uMax] 为该边范围
+ * 返回 {tabs:[[u0,u1]..], gaps:[[u0,u1]..]}
+ * 判据: 在 u 处取一个略越过基准线的探测点，若在轮廓内 => 该处是榫头
+ */
+function edgeSpans(loop, axis, baseVal, dir, uAxis, uMin, uMax, probe) {
+  var flat = G.flatten(loop, 0.02);
+  probe = probe || 0.5;
+  var pv = baseVal + dir * probe;          // 探测线(越过板边)
+  var N = 4000, tabs = [], gaps = [], cur = null, curIsTab = null;
+  for (var i = 0; i <= N; i++) {
+    var u = uMin + (uMax - uMin) * (i / N);
+    var pt = {};
+    pt[uAxis] = u; pt[axis] = pv;
+    var isTab = G.pointInPoly(pt, flat);
+    if (curIsTab === null) { cur = [u, u]; curIsTab = isTab; continue; }
+    if (isTab === curIsTab) { cur[1] = u; continue; }
+    (curIsTab ? tabs : gaps).push(cur);
+    cur = [u, u]; curIsTab = isTab;
+  }
+  if (cur) (curIsTab ? tabs : gaps).push(cur);
+  // 扫描步长带来的量化误差, 用轮廓顶点吸附到精确坐标
+  var coords = [];
+  flat.forEach(function (q) { coords.push(q[uAxis]); });
+  function snap(v) {
+    var best = v, bd = 1e9;
+    coords.forEach(function (c) { var dd = Math.abs(c - v); if (dd < bd) { bd = dd; best = c; } });
+    return bd <= (uMax - uMin) / N * 2.5 ? best : v;
+  }
+  function fix(arr) {
+    return arr.filter(function (g) { return g[1] - g[0] > (uMax - uMin) / N * 1.5; })
+              .map(function (g) { return [snap(g[0]), snap(g[1])]; });
+  }
+  return { tabs: fix(tabs), gaps: fix(gaps) };
+}
+function protrusions(loop, axis, baseVal, dir, uAxis, uMin, uMax, probe) {
+  return edgeSpans(loop, axis, baseVal, dir, uAxis, uMin, uMax, probe).tabs;
+}
+function notches(loop, axis, baseVal, dir, uAxis, uMin, uMax, probe) {
+  return edgeSpans(loop, axis, baseVal, dir, uAxis, uMin, uMax, probe).gaps;
+}
+
+try {
+var t = 15, fit = 0.2, W = 600, D = 320, H = 720;
+var r = Models.box({ thickness: t, width: W, depth: D, height: H, fit: fit, shelves: 1, backStyle: 'tenon' });
+var by = {};
+r.parts.forEach(function (p) { by[p.name] = p; });
+
+/* ---- 1. 角部指接: 底板左右榫头 vs 侧板底边榫头 ----
+ * 底板画布: (W-2t) x D, 左右边(x 方向)出榫, 榫沿 y(=深度 d) 分布
+ * 侧板画布: D x (H-2t), 底边出榫, 榫沿 x(=深度 d) 分布
+ * 两者的"深度坐标"应互补: 底板榫的 d 区间 == 侧板缺口的 d 区间
+ */
+var bot = by['底板'], side = by['左侧板'];
+var bb = bot.bbox(), sb = side.bbox();
+// 底板右边榫头: x 超出 (W-2t) 的部分, u 轴 = y = 深度
+var botTabs = protrusions(bot.outer, 'x', W - 2 * t, +1, 'y', 0, D);
+// 侧板底边榫头: y < 0 的部分, u 轴 = x = 深度
+var sideTabs = protrusions(side.outer, 'y', 0, -1, 'x', 0, D);
+var sideGaps = notches(side.outer, 'y', 0, -1, 'x', 0, D);
+chk('底板右边有榫头', botTabs.length > 0, JSON.stringify(botTabs.map(function (s) { return [G.round(s[0], 2), G.round(s[1], 2)]; })));
+chk('侧板底边有榫头', sideTabs.length > 0, sideTabs.length);
+chk('榫头数互补(底板榫数 == 侧板缺口数)', botTabs.length === sideGaps.length, botTabs.length + ' vs ' + sideGaps.length);
+
+// 逐个校核: 底板榫头必须落在侧板缺口内, 且两侧各有 ~fit/2 间隙
+var mateOk = 0, mateWhy = [];
+botTabs.forEach(function (tb) {
+  var host = null;
+  sideGaps.forEach(function (gp) {
+    if (tb[0] >= gp[0] - 1e-6 && tb[1] <= gp[1] + 1e-6) host = gp;
+  });
+  if (!host) { mateWhy.push('榫 [' + G.round(tb[0], 2) + ',' + G.round(tb[1], 2) + '] 无匹配缺口'); return; }
+  var cl0 = tb[0] - host[0], cl1 = host[1] - tb[1];
+  // fit 为总间隙 => 单侧 fit/2；扫描量化误差容 0.01
+  if (near(cl0, fit / 2, 0.01) && near(cl1, fit / 2, 0.01) && near(cl0 + cl1, fit, 0.01)) mateOk++;
+  else mateWhy.push('间隙 ' + G.round(cl0, 4) + '/' + G.round(cl1, 4) + ' 应为 ' + fit / 2);
+});
+chk('每个榫头都落入缺口且间隙=fit/2', mateOk === botTabs.length && !mateWhy.length,
+  mateOk + '/' + botTabs.length + ' ' + mateWhy.slice(0, 2).join(';'));
+
+// 榫头长度必须等于板厚(通榫齐平)
+var tabLen = 0, lenOk = true;
+botTabs.forEach(function () {});
+var maxX = G.loopBBox(bot.outer).x1;
+chk('底板榫头长度 = 板厚', near(maxX - (W - 2 * t), t, 1e-9), maxX - (W - 2 * t));
+chk('底板总宽 = W (装配后齐平)', near(G.loopBBox(bot.outer).w, W, 1e-9), G.loopBBox(bot.outer).w);
+var syb = G.loopBBox(side.outer);
+chk('侧板榫头长度 = 板厚', near(-syb.y0, t, 1e-9), -syb.y0);
+chk('侧板总高 = H (装配后齐平)', near(syb.h, H, 1e-9), syb.h);
+
+/* ---- 2. 背板通榫 vs 顶底板/侧板榫眼 ---- */
+var back = by['背板'];
+// 背板底边榫头 (y<0), u 轴 = x
+var backBotTabs = protrusions(back.outer, 'y', 0, -1, 'x', 0, W - 2 * t);
+// 底板上的榫眼(孔), 沿 x 分布
+var botHoles = bot.holes.map(function (h) { var b = G.loopBBox(h); return { x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, w: b.w, h: b.h }; });
+chk('背板底边榫头数 == 底板榫眼数', backBotTabs.length === botHoles.length, backBotTabs.length + ' vs ' + botHoles.length);
+// 底板榫眼的 x 坐标是相对底板画布(0..W-2t), 背板 x 也是 0..W-2t -> 可直接比较
+botHoles.sort(function (a, b) { return a.x0 - b.x0; });
+var mOk = 0, mWhy = [];
+backBotTabs.forEach(function (tb, i) {
+  var h = botHoles[i];
+  if (!h) { mWhy.push('缺榫眼'); return; }
+  var c0 = tb[0] - h.x0, c1 = h.x1 - tb[1];
+  if (near(c0, fit / 2, 0.01) && near(c1, fit / 2, 0.01)) mOk++;
+  else mWhy.push('榫[' + G.round(tb[0], 2) + ',' + G.round(tb[1], 2) + '] 眼[' + G.round(h.x0, 2) + ',' + G.round(h.x1, 2) + '] 间隙' + G.round(c0, 3) + '/' + G.round(c1, 3));
+});
+chk('背板榫头与底板榫眼逐个对齐(间隙 fit/2)', mOk === backBotTabs.length && !mWhy.length,
+  mOk + '/' + backBotTabs.length + ' ' + mWhy.slice(0, 2).join(';'));
+// 榫眼宽度必须 = 板厚 + fit (让板能插入)
+var wOk = botHoles.every(function (h) { return near(h.h, t + fit, 1e-6); });
+chk('榫眼宽度 = 板厚 + fit', wOk, botHoles.length ? G.round(botHoles[0].h, 3) : 'n/a');
+// 背板榫头长度 = 板厚(穿透)
+chk('背板榫头长度 = 板厚', near(-G.loopBBox(back.outer).y0, t, 1e-9), -G.loopBBox(back.outer).y0);
+
+/* ---- 3. 层板通榫 vs 侧板榫眼 ---- */
+var shelf = by['层板1'];
+var shDepth = G.loopBBox(shelf.outer).h;
+var shRight = protrusions(shelf.outer, 'x', (W - 2 * t), +1, 'y', 0, shDepth);
+chk('层板右边有通榫', shRight.length > 0, shRight.length);
+chk('层板总宽 = W (穿透两侧板)', near(G.loopBBox(shelf.outer).w, W, 1e-6), G.loopBBox(shelf.outer).w);
+// 侧板上的层板榫眼: 找 y 居中的那一组孔
+var shelfHoles = side.holes.filter(function (h) {
+  var b = G.loopBBox(h);
+  return b.h < t + fit + 0.01 && b.h > t - 0.01;   // 水平槽: 高度 = t+fit
+}).map(function (h) { return G.loopBBox(h); });
+chk('侧板含层板榫眼', shelfHoles.length >= shRight.length, shelfHoles.length);
+/* 注意坐标系: 层板画布的 y(0..shelfDepth) 是"深度"局部坐标，
+ * 而侧板画布的 x 是从板后沿起算的深度坐标，层板起点位于 x0。
+ * 因此比较时必须把层板榫加上 x0 偏移换算到侧板坐标系。*/
+var backInset = 15, shelfSetback = 2;
+var x0 = backInset + t / 2 + shelfSetback;
+shelfHoles.sort(function (a, b) { return a.x0 - b.x0; });
+var sOk = 0, sWhy = [];
+shRight.forEach(function (tb, i) {
+  var h = shelfHoles[i];
+  if (!h) return;
+  var a0 = tb[0] + x0, a1 = tb[1] + x0;          // 换算到侧板坐标系
+  var c0 = a0 - h.x0, c1 = h.x1 - a1;
+  if (near(c0, fit / 2, 0.01) && near(c1, fit / 2, 0.01) && near(c0 + c1, fit, 0.02)) sOk++;
+  else sWhy.push('榫[' + G.round(a0, 2) + ',' + G.round(a1, 2) + '] 眼[' + G.round(h.x0, 2) + ',' + G.round(h.x1, 2) + '] 间隙' + G.round(c0, 3) + '/' + G.round(c1, 3));
+});
+chk('层板榫与侧板榫眼对齐(含坐标系换算)', sOk === shRight.length && !sWhy.length, sOk + '/' + shRight.length + ' ' + sWhy.slice(0, 2).join(';'));
+
+/* ---- 4. 抽屉四角: 前板榫头 vs 侧板缺口 ---- */
+var dr = Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, fit: 0.15 });
+var dby = {}; dr.parts.forEach(function (p) { dby[p.name] = p; });
+var fr = dby['抽屉前板'], lf = dby['抽屉左板'];
+/* 【第 6 轮修的尺寸 BUG】旧版左/右板矩形画成整个 D=300, 两边又各出一个
+ * 板厚的通榫 -> 抽屉实际进深 300+24=324, 塞不进柜体。
+ * 修后两对板都画"肩距": 前/后板 400-24=376, 左/右板 300-24=276。
+ * 所以探测基准跟着变, 下面又直接断言外形尺寸锁死这个回归。 */
+var FB_SH = 400 - 2 * 12, LR_SH = 300 - 2 * 12;
+chk('抽屉前板外形宽 = W(通榫齐平)', near(fr.bbox().w, 400, 1e-6), fr.bbox().w);
+chk('抽屉左板外形宽 = D(不多出 2 个板厚)', near(lf.bbox().w, 300, 1e-6), lf.bbox().w);
+chk('抽屉肩距 = [W-2t, D-2t]', dr.info.shoulder[0] === FB_SH && dr.info.shoulder[1] === LR_SH,
+  JSON.stringify(dr.info.shoulder));
+var frTabs = protrusions(fr.outer, 'x', FB_SH, +1, 'y', 0, 120);
+var lfTabs = protrusions(lf.outer, 'x', LR_SH, +1, 'y', 0, 120);
+var lfGaps = notches(lf.outer, 'x', LR_SH, +1, 'y', 0, 120);
+chk('抽屉前板有榫头', frTabs.length > 0, frTabs.length);
+chk('抽屉侧板有榫头', lfTabs.length > 0, lfTabs.length);
+chk('抽屉前板榫 vs 侧板缺口 互补', frTabs.length === lfGaps.length, frTabs.length + ' vs ' + lfGaps.length);
+var dOk = 0, dWhy = [];
+frTabs.forEach(function (tb) {
+  var host = null;
+  lfGaps.forEach(function (gp) { if (tb[0] >= gp[0] - 1e-6 && tb[1] <= gp[1] + 1e-6) host = gp; });
+  if (!host) { dWhy.push('无匹配'); return; }
+  if (near(tb[0] - host[0], 0.075, 0.01) && near(host[1] - tb[1], 0.075, 0.01)) dOk++;
+  else dWhy.push(G.round(tb[0] - host[0], 4) + '/' + G.round(host[1] - tb[1], 4));
+});
+chk('抽屉角部榫头间隙 = fit/2', dOk === frTabs.length && !dWhy.length, dOk + '/' + frTabs.length + ' ' + dWhy.slice(0, 2).join(';'));
+
+/* ---- 5. 燕尾: 90° 角接不得张角, 共面拼板才真自锁 ----
+ *
+ * 【第 6 轮推翻了旧断言】旧版这里断言"抽屉选燕尾时每个榫头顶端更宽",
+ * 可那个几何在直刀通切下是**无解**的(证明见 joints.js tabProfile 头部)。
+ * 它真实的后果: drawer 选 dovetail 时装配包围盒变成 z[-2.3,122.3],
+ * 即侧板榫尖跮出抽屉高度、且与前板榫尖互相侵入 4.59mm。
+ * 现在改为: 角接自动降为直榫(仍能切能装), 自锁需求交给拼图燕尾。 */
+var dv = Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, fit: 0.15, jointStyle: 'dovetail' });
+var dvfr = dv.parts[0];
+var xr = 400 - 2 * 12;
+var atRootSpans = protrusions(dvfr.outer, 'x', xr, +1, 'y', 0, 120, 0.6);
+var atTipSpans = protrusions(dvfr.outer, 'x', xr, +1, 'y', 0, 120, 11.4);
+chk('燕尾: 根部/顶端榫头数一致', atRootSpans.length === atTipSpans.length && atRootSpans.length > 0,
+  atRootSpans.length + '/' + atTipSpans.length);
+var flatOk = 0, flatWhy = [];
+atRootSpans.forEach(function (rs, i) {
+  var ts = atTipSpans[i];
+  if (!ts) return;
+  var rw = rs[1] - rs[0], tw = ts[1] - ts[0];
+  if (Math.abs(tw - rw) < 0.05) flatOk++;
+  else flatWhy.push('根' + G.round(rw, 2) + ' 顶' + G.round(tw, 2));
+});
+chk('抽屉角接选 dovetail 也不张角(已降级, 否则必干涉)',
+  flatOk === atRootSpans.length && !flatWhy.length, flatOk + '/' + atRootSpans.length + ' ' + flatWhy.slice(0, 2).join(';'));
+/* 并且四周竖板的轮廓不得跮出抽屉高度 —— 这是旧版真实的干涉痕迹。
+ * 注意只能算四周竖板: 底板是水平板, 它的局部 y 是深度而不是高度。
+ * 更硬的判据已经由下面的"装配包围盒 == 400×300×120"盖住。 */
+dv.parts.filter(function (p) { return p.name !== '抽屉底板'; }).forEach(function (p) {
+  var b = p.bbox();
+  chk('燕尾抽屉 ' + p.name + ' 高度不跮出 120', b.y0 > -1e-6 && b.y1 < 120 + 1e-6,
+    '[' + G.round(b.y0, 2) + ',' + G.round(b.y1, 2) + ']');
+});
+// 直榫对照: 顶端与根部等宽
+var st8 = Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, fit: 0.15, jointStyle: 'finger' });
+var sr = protrusions(st8.parts[0].outer, 'x', xr, +1, 'y', 0, 120, 0.6);
+var stp = protrusions(st8.parts[0].outer, 'x', xr, +1, 'y', 0, 120, 11.4);
+var straightOk = sr.length === stp.length && sr.every(function (a, i) {
+  return Math.abs((a[1] - a[0]) - (stp[i][1] - stp[i][0])) < 0.05;
+});
+chk('直榫顶端与根部等宽(对照)', straightOk, sr.length + '/' + stp.length);
+
+/* 共面拼板燕尾才是真自锁: 颈部 < 头部, 且两块板互补时总间隙 = fit */
+(function () {
+  var sp = J.spansFor(300, { t: 15, m: 5, phase: 0 });
+  var sq = J.spansFor(300, { t: 15, m: 5, phase: 1 });
+  var A = J.puzzleProfile(sp, 15, { fit: 0.2, neck: 0.45 });
+  var B = J.puzzleProfile(sq, 15, { fit: 0.2, neck: 0.45 });
+  /* A 的榫头占 sp.tabs, B 的占 sq.tabs == sp.gaps => 两者不重叠 */
+  function tops(pf) {
+    var out = [];
+    for (var i = 0; i + 5 < pf.length + 1; i += 6) {
+      if (!pf[i + 3]) break;
+      out.push([pf[i + 2].u, pf[i + 3].u]);
+    }
+    return out;
+  }
+  var ta = tops(A), tb = tops(B);
+  var clash = 0;
+  ta.forEach(function (a) {
+    tb.forEach(function (b) { if (Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 1e-9) clash++; });
+  });
+  chk('拼图燕尾: 两块板的燕尾头不互相侵入', clash === 0, clash);
+  /* 相邻一对(A 的榫 与 B 的榫)之间的净缝 == fit/2 (各收 fit/4) */
+  var gapOk = 0, gapWhy = [];
+  ta.forEach(function (a) {
+    tb.forEach(function (b) {
+      var d = b[0] - a[1];
+      if (d > 0 && d < 1) { if (Math.abs(d - 0.1) < 1e-6) gapOk++; else gapWhy.push(G.round(d, 5)); }
+      var d2 = a[0] - b[1];
+      if (d2 > 0 && d2 < 1) { if (Math.abs(d2 - 0.1) < 1e-6) gapOk++; else gapWhy.push(G.round(d2, 5)); }
+    });
+  });
+  chk('拼图燕尾: 相邻榫齿净缝 = fit/2', gapOk > 0 && !gapWhy.length, gapOk + ' ' + gapWhy.slice(0, 3).join(','));
+})();
+
+/* ============================================================
+ * 6. 装配包围盒 == 标称 W × D × H
+ *
+ * 这是"3D 没错位"最硬的一条判据, 也是“切出来能拼成真尺寸家具”的判据。
+ * 第 6 轮开头实测: box/bookshelf 胖 15mm、drawer 五块板堆在原点、
+ * table 两片腿架全在 x=0、lattice 竖隔板偏半个板厚、配方每个方向胖一个板厚。
+ * 这一组断言把上述全部锁死。
+ * ============================================================ */
+function asmChk(label, res, W, D, H, tol) {
+  var bb = Render.asmBBox(Render.boxesFrom(res.parts, {}));
+  tol = tol || 1e-6;
+  var ok = bb && Math.abs(bb.x0) < tol && Math.abs(bb.y0) < tol && Math.abs(bb.z0) < tol &&
+    Math.abs(bb.w - W) < tol && Math.abs(bb.d - D) < tol && Math.abs(bb.h - H) < tol;
+  chk(label + ' 装配包围盒 == ' + W + '×' + D + '×' + H, !!ok,
+    bb ? ('x[' + G.round(bb.x0, 2) + ',' + G.round(bb.x1, 2) + '] y[' + G.round(bb.y0, 2) + ',' +
+      G.round(bb.y1, 2) + '] z[' + G.round(bb.z0, 2) + ',' + G.round(bb.z1, 2) + ']') : 'null');
+}
+asmChk('box', Models.box({ thickness: 15, width: 600, depth: 320, height: 720, fit: 0.2, shelves: 2 }), 600, 320, 720);
+asmChk('box 无顶板', Models.box({ thickness: 15, width: 600, depth: 320, height: 720, fit: 0.2, withTop: false, shelves: 1 }), 600, 320, 720);
+asmChk('box 无背板', Models.box({ thickness: 18, width: 500, depth: 300, height: 900, fit: 0.2, backStyle: 'none', shelves: 3 }), 500, 300, 900);
+asmChk('bookshelf', Models.bookshelf({ thickness: 18, width: 800, depth: 280, height: 1800, shelves: 4 }), 800, 280, 1800);
+asmChk('drawer', Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, fit: 0.15 }), 400, 300, 120);
+asmChk('drawer 燕尾', Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120, fit: 0.15, jointStyle: 'dovetail' }), 400, 300, 120);
+asmChk('lattice', Models.lattice({ thickness: 12, width: 600, depth: 300, height: 400, cols: 3, rows: 2 }), 600, 300, 400);
+asmChk('table', Models.table({ thickness: 18, width: 1200, depth: 600, height: 740 }), 1200, 600, 740);
+
+/* 每块板的厚度必须落在它的法向轴上(不能被当成"宽")。
+ * 旧版 drawer 一块板都没给 asm.plane, 全部退化成 XY, 于是四周竖板全摄平了。 */
+(function () {
+  var NORM = { XY: 'z', YZ: 'x', XZ: 'y' };
+  [['box', Models.box({ thickness: 15, width: 600, depth: 320, height: 720, shelves: 2 })],
+   ['drawer', Models.drawer({ thickness: 12, width: 400, depth: 300, height: 120 })],
+   ['lattice', Models.lattice({ thickness: 12, width: 600, depth: 300, height: 400 })],
+   ['table', Models.table({ thickness: 18, width: 1200, depth: 600, height: 740 })]
+  ].forEach(function (cs) {
+    var bad = [];
+    Render.boxesFrom(cs[1].parts, {}).forEach(function (b) {
+      var pl = b.part.meta.asm && b.part.meta.asm.plane;
+      if (!pl || !NORM[pl]) { bad.push(b.name + ':无 asm.plane'); return; }
+      if (Math.abs(b.size[NORM[pl]] - b.part.thickness) > 1e-6) {
+        bad.push(b.name + ':厚度不在 ' + NORM[pl] + ' 轴');
+      }
+    });
+    chk(cs[0] + ' 每块板厚度都在自己的法向轴上', bad.length === 0, bad.slice(0, 3).join('|'));
+  });
+})();
+
+/* ---- 6. 格架搭接: 竖板槽深 + 横板槽深 = 板宽(严丝合缝) ---- */
+var la = Models.lattice({ thickness: 12, width: 600, depth: 300, height: 400, cols: 3, rows: 2, fit: 0.2 });
+var vp = la.parts[0], hp = la.parts[3];
+chk('竖板槽深 + 横板槽深 = 深度 D', near(la.info.slotDepth * 2, 300, 1e-9), la.info.slotDepth * 2);
+// 竖板(300 x 400): 槽自前沿 x=300 切入 => 在 x 略小于 300 处扫描, 缺口即为槽
+var vgap = notches(vp.outer, 'x', 300, -1, 'y', 0, 400, 0.5);
+chk('竖板槽数 = 横隔板数', vgap.length === 2, vgap.length + ' ' + JSON.stringify(vgap.map(function (g) { return [G.round(g[0], 2), G.round(g[1], 2)]; })));
+var vw = vgap.length ? vgap[0][1] - vgap[0][0] : 0;
+chk('竖板槽宽 = t + fit', near(vw, 12.2, 0.02), G.round(vw, 3));
+// 槽深: 在槽中心沿 x 找材料边界
+var yc = vgap.length ? (vgap[0][0] + vgap[0][1]) / 2 : 0;
+var flatV = G.flatten(vp.outer, 0.02);
+var deepest = 300;
+for (var xx = 300; xx > 0; xx -= 0.25) {
+  if (G.pointInPoly({ x: xx, y: yc }, flatV)) { deepest = xx; break; }
+}
+chk('竖板槽深 = D/2', near(300 - deepest, 150, 0.5), G.round(300 - deepest, 2));
+// 横板(600 x 300): 槽自后沿 y=0 切入
+var hgap = notches(hp.outer, 'y', 0, +1, 'x', 0, 600, 0.5);
+chk('横板槽数 = 竖隔板数', hgap.length === 3, hgap.length);
+var hw = hgap.length ? hgap[0][1] - hgap[0][0] : 0;
+chk('横板槽宽 = t + fit', near(hw, 12.2, 0.02), G.round(hw, 3));
+var xc = hgap.length ? (hgap[0][0] + hgap[0][1]) / 2 : 0;
+var flatH = G.flatten(hp.outer, 0.02);
+var deepH = 0;
+for (var yy = 0; yy < 300; yy += 0.25) {
+  if (G.pointInPoly({ x: xc, y: yy }, flatH)) { deepH = yy; break; }
+}
+chk('横板槽深 = D/2', near(deepH, 150, 0.5), G.round(deepH, 2));
+// 交叉处两槽宽度一致 => 能对插
+chk('两向槽宽一致(可对插)', near(vw, hw, 1e-6), G.round(vw, 3) + '/' + G.round(hw, 3));
+} catch (e) { L.push('FAIL exception ' + e.message + '\n' + (e.stack || '')); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>

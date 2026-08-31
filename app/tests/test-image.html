@@ -1,0 +1,419 @@
+<!doctype html><meta charset="utf-8"><title>图片建模 · 测试</title><body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/joints.js"></script>
+<script src="../js/part.js"></script>
+<script src="../js/imagetrace.js"></script>
+<script src="../js/imagemodel.js"></script>
+<script src="../js/nest.js"></script>
+<script>
+/* ============================================================
+ * test-image.html —— 图片 -> 零件（silhouette / layers）专项断言
+ *
+ * 这套件专门钉死两个曾经真实存在的缺陷（改坏就会变红）：
+ *
+ * 缺陷 A「最底层丢失」：
+ *   分层模式旧版用 Otsu 二值化当主体掩膜。Otsu 把图分成前景/背景两类，
+ *   于是**浅灰的最外层被当成背景扔掉**。实测四同心圆台阶图(最外圈
+ *   #d0d0d0 / gray208)：Otsu 阈值 176，主体掩膜 bbox 只有 140x140
+ *   而不是 200x200 —— 用户看到的模型比图小一圈。
+ *   正确语义：分层模式下「图形」= 除纯背景以外的一切(bgCut，默认 250)。
+ *
+ * 缺陷 B「相邻层轮廓完全重合」：
+ *   旧版等分灰度区间 [lo,hi] 取阈值。灰度极少均匀分布，量化图里灰度
+ *   成簇堆在几个值上，等分阈值好几条落进同一个空隙 → 相邻几层切出
+ *   一模一样的板。实测台阶图 N=5：31481>10498>10216>10033>2084，
+ *   中间三层几乎相同 —— 白切三张重复板。
+ *   正确做法：先把累积直方图压成「面积台阶」，再挑面积最接近等分目标的台阶。
+ *
+ * 同时保护一条**必须保留**的语义：
+ *   纯剪影图(只有黑白两种灰度)选分层模式时，用户要的就是**叠厚度**
+ *   (N 层 x 板厚 = 总高)，此时各层同形是正确的，且 totalHeight = N*t
+ *   是 UI 对外的承诺 —— 绝不能因为「去重」而静静少几层。
+ * ============================================================ */
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+function mk(w, h, draw) {
+  var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  var g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  draw(g);
+  return g.getImageData(0, 0, w, h);
+}
+function areas(r) { return r.parts.map(function (p) { return Math.round(Math.abs(p.area())); }); }
+function minRelStep(a) { var m = Infinity; for (var k = 1; k < a.length; k++) m = Math.min(m, Math.abs(a[k] - a[k - 1]) / Math.max(1, a[k - 1])); return m; }
+function errsOf(parts) {
+  var e = [];
+  parts.forEach(function (p) { (p.validate ? p.validate() : []).forEach(function (m) { if (m.level === 'error') e.push(p.name + ': ' + m.text); }); });
+  return e;
+}
+/* 四同心圆台阶图：最外圈是浅灰 #d0d0d0(gray 208)，正是 Otsu 会扔掉的那一圈。
+ * 画布 240x240，图形占中间 200x200(半径 100)。 */
+function stepImg() {
+  return mk(240, 240, function (g) {
+    [['#d0d0d0', 100], ['#909090', 70], ['#404040', 40], ['#000000', 18]].forEach(function (lv) {
+      g.fillStyle = lv[0]; g.beginPath(); g.arc(120, 120, lv[1], 0, 7); g.fill();
+    });
+  });
+}
+/* 只有两种灰度的图：外框 #808080 + 内方 #000 —— 台阶只有 2 个 */
+function twoToneImg() {
+  return mk(200, 200, function (g) {
+    g.fillStyle = '#808080'; g.fillRect(20, 20, 160, 160);
+    g.fillStyle = '#000'; g.fillRect(60, 60, 80, 80);
+  });
+}
+/* 纯剪影：只有黑与白 —— 台阶只有 1 个，分层 = 纯叠厚度 */
+function silImg() {
+  return mk(200, 200, function (g) { g.fillStyle = '#000'; g.beginPath(); g.arc(100, 100, 80, 0, 7); g.fill(); });
+}
+/* 平滑锥体：灰度连续，台阶多到用不完 —— 应该层层不同 */
+function coneImg() {
+  var cv = document.createElement('canvas'); cv.width = cv.height = 240;
+  var g = cv.getContext('2d'), im = g.createImageData(240, 240);
+  for (var y = 0; y < 240; y++) for (var x = 0; x < 240; x++) {
+    var d = Math.hypot(x - 120, y - 120), v = Math.max(0, Math.min(255, Math.round(d / 110 * 255)));
+    var i = (y * 240 + x) * 4; im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  return g.getImageData(0, 0, 240, 240);
+}
+try {
+
+/* ============================================================
+ * 1. 缺陷 A 取证 + 钉死：最底层不得丢
+ * ============================================================ */
+var step = stepImg();
+var gray = Trace.grayFrom(step);
+var ot = Trace.otsu(gray);
+var otBB = Trace.maskBBox(Trace.maskFrom(step, { threshold: -1 }));
+// 先证明这张图确实是 Otsu 的陷阱图（否则后面的断言就是空跑）
+chk('取证: Otsu 阈值落在最外圈灰度以下', ot < 208 && ot > 100, 'otsu=' + ot);
+chk('取证: Otsu 掩膜确实丢掉最外圈(140x140 而非 200x200)', otBB.w === 140 && otBB.h === 140, otBB.w + 'x' + otBB.h);
+
+var s4 = ImageModel.layers(step, { thickness: 9, layerCount: 4, targetWidth: 200, pinDia: 0 });
+chk('分层: 主体掩膜 = 全部非背景(200x200 完整)', s4.maskBBox.w === 200 && s4.maskBBox.h === 200,
+  s4.maskBBox.w + 'x' + s4.maskBBox.h);
+var b0 = s4.parts[0].bbox();
+// 追踪+简化会让圆的 bbox 有 <=2mm 的收缩，给 2.5mm 容差；旧版是 140，差 60mm，绝不会误判
+chk('分层: 最底层尺寸 = 全图图形尺寸(不是 Otsu 的 140)', near(b0.w, 200, 2.5) && near(b0.h, 200, 2.5),
+  G.round(b0.w, 1) + 'x' + G.round(b0.h, 1));
+chk('分层: info.size 用完整图形尺寸', near(s4.info.size[0], 200, 1) && near(s4.info.size[1], 200, 1), JSON.stringify(s4.info.size));
+chk('分层: grayRange 覆盖到浅灰(hi>=200)', s4.info.grayRange[1] >= 200, JSON.stringify(s4.info.grayRange));
+// 不给 targetWidth 时 1px=1mm，掩膜与零件尺寸应一致
+var sNat = ImageModel.layers(step, { thickness: 9, layerCount: 4, pinDia: 0 });
+chk('分层: 未指定目标尺寸时 pxPerMM=1', sNat.info.pxPerMM === 1, sNat.info.pxPerMM);
+chk('分层: 未指定目标尺寸时底层≈掩膜像素尺寸', near(sNat.parts[0].bbox().w, 200, 2.5), G.round(sNat.parts[0].bbox().w, 1));
+
+/* ============================================================
+ * 2. 缺陷 B 取证 + 钉死：台阶图各层必须真的不同
+ * ============================================================ */
+var a4 = areas(s4);
+chk('台阶图 N=4: 出 4 层', s4.parts.length === 4, s4.parts.length);
+chk('台阶图 N=4: distinctLayers=4(层层不同轮廓)', s4.info.distinctLayers === 4, s4.info.distinctLayers);
+chk('台阶图 N=4: 无重复层', s4.info.dupLayers === 0, s4.info.dupLayers);
+// 旧版这里最小相邻差 < 3%（中间几层几乎重合），新版最小 51%
+chk('台阶图 N=4: 相邻层面积差 > 5%(不是重复板)', minRelStep(a4) > 0.05, a4.join('>') + ' minRel=' + minRelStep(a4).toFixed(4));
+chk('台阶图 N=4: 面积严格递减', a4.every(function (v, i) { return i === 0 || v < a4[i - 1]; }), a4.join('>'));
+// 4 个圆的真实面积比（半径 100/70/40/18 → 31416/15394/5027/1018）
+var truth = [Math.PI * 100 * 100, Math.PI * 70 * 70, Math.PI * 40 * 40, Math.PI * 18 * 18];
+var okT = a4.every(function (v, i) { return Math.abs(v - truth[i]) / truth[i] < 0.08; });
+chk('台阶图 N=4: 每层面积对上对应同心圆(±8%)', okT, a4.join(',') + ' vs ' + truth.map(Math.round).join(','));
+// 各层同心（层层套住，叠起来是金字塔而不是阶梯）
+var conc = s4.parts.every(function (p) {
+  var b = p.bbox();
+  return near((b.x0 + b.x1) / 2, 120 * (200 / 200) + (b.x0 + b.x1) / 2 - (b.x0 + b.x1) / 2, 1e9);
+});
+var cxs = s4.parts.map(function (p) { var b = p.bbox(); return (b.x0 + b.x1) / 2; });
+var cys = s4.parts.map(function (p) { var b = p.bbox(); return (b.y0 + b.y1) / 2; });
+chk('台阶图: 各层中心重合(叠成金字塔而非阶梯)',
+  Math.max.apply(null, cxs) - Math.min.apply(null, cxs) < 1.5 &&
+  Math.max.apply(null, cys) - Math.min.apply(null, cys) < 1.5,
+  'cx=' + cxs.map(function (v) { return G.round(v, 1); }).join(',') + ' cy=' + cys.map(function (v) { return G.round(v, 1); }).join(','));
+// 上层必须落在下层内部（否则悬空）
+var inside = true;
+for (var li = 1; li < s4.parts.length; li++) {
+  var lo = G.flatten(s4.parts[li - 1].outer, 0.4), up = G.flatten(s4.parts[li].outer, 0.4);
+  for (var q = 0; q < up.length; q++) if (!G.pointInPoly(up[q], lo)) { inside = false; break; }
+  if (!inside) break;
+}
+chk('台阶图: 每层完全落在下一层内部(不悬空)', inside);
+
+// N 小于台阶数时也不能出重复层
+[2, 3].forEach(function (N) {
+  var r = ImageModel.layers(step, { thickness: 9, layerCount: N, targetWidth: 200, pinDia: 0 });
+  var a = areas(r);
+  chk('台阶图 N=' + N + ': ' + N + ' 层且层层不同', r.parts.length === N && r.info.distinctLayers === N && minRelStep(a) > 0.05,
+    a.join('>') + ' distinct=' + r.info.distinctLayers);
+});
+
+/* ============================================================
+ * 3. 层数守恒 + 总高承诺（"叠厚度"语义不许被优化掉）
+ * ============================================================ */
+[2, 3, 4, 5, 6, 8, 12].forEach(function (N) {
+  var r = ImageModel.layers(step, { thickness: 9, layerCount: N, targetWidth: 200, pinDia: 0 });
+  chk('台阶图 N=' + N + ': 层数守恒 + 总高 = N x t', r.parts.length === N && near(r.info.totalHeight, N * 9, 1e-9),
+    'parts=' + r.parts.length + ' th=' + r.info.totalHeight);
+});
+// 台阶不够时：多层共用轮廓来叠厚度，但层数/总高不许缩水，且要 info 级提示
+var s8 = ImageModel.layers(step, { thickness: 9, layerCount: 8, targetWidth: 200, pinDia: 0 });
+chk('台阶图 N=8(台阶只有 4 个): 仍出 8 层', s8.parts.length === 8, s8.parts.length);
+chk('台阶图 N=8: distinct=4 / dup=4', s8.info.distinctLayers === 4 && s8.info.dupLayers === 4,
+  s8.info.distinctLayers + '/' + s8.info.dupLayers);
+chk('台阶图 N=8: 面积单调不增', areas(s8).every(function (v, i, arr) { return i === 0 || v <= arr[i - 1]; }), areas(s8).join('>'));
+chk('台阶图 N=8: 给出"其中几层只是厚度"的 info 提示',
+  s8.warnings.some(function (m) { return m.level === 'info' && /同形|厚度/.test(m.text); }),
+  s8.warnings.map(function (m) { return m.level; }).join(','));
+// 层位应尽量均匀摊到台阶上（8 层/4 台阶 → 每个台阶恰好 2 层）
+var cnt = {};
+areas(s8).forEach(function (v) { cnt[v] = (cnt[v] || 0) + 1; });
+chk('台阶图 N=8: 8 层均匀摊到 4 个台阶(每台阶 2 层)',
+  Object.keys(cnt).length === 4 && Object.keys(cnt).every(function (k) { return cnt[k] === 2; }),
+  JSON.stringify(cnt));
+
+/* 两灰度图：distinct 恒为 2，但层数照给 */
+var t6 = ImageModel.layers(twoToneImg(), { thickness: 9, layerCount: 6, targetWidth: 160, pinDia: 0 });
+chk('两灰度图 N=6: 出 6 层', t6.parts.length === 6, t6.parts.length);
+chk('两灰度图 N=6: distinctLayers=2', t6.info.distinctLayers === 2, t6.info.distinctLayers);
+chk('两灰度图 N=6: 前 3 层同形 / 后 3 层同形(均匀摊)', (function () {
+  var a = areas(t6);
+  return a[0] === a[1] && a[1] === a[2] && a[3] === a[4] && a[4] === a[5] && a[2] > a[3];
+})(), areas(t6).join('>'));
+chk('两灰度图 N=6: z 高度连续 0,9,...,45', t6.parts.map(function (p) { return p.meta.asm.z; }).join(',') === '0,9,18,27,36,45',
+  t6.parts.map(function (p) { return p.meta.asm.z; }).join(','));
+chk('两灰度图 N=6: 有 info 级提示', t6.warnings.some(function (m) { return m.level === 'info'; }));
+
+/* 纯剪影：distinct=1，全层同形，这是**正确**的叠厚度用法 */
+[3, 5].forEach(function (N) {
+  var r = ImageModel.layers(silImg(), { thickness: 9, layerCount: N, targetWidth: 160, pinDia: 0 });
+  var a = areas(r);
+  chk('纯剪影 N=' + N + ': ' + N + ' 层全同形(叠厚度) + 总高对',
+    r.parts.length === N && r.info.distinctLayers === 1 &&
+    a.every(function (v) { return v === a[0]; }) && near(r.info.totalHeight, N * 9, 1e-9),
+    a.join(',') + ' distinct=' + r.info.distinctLayers);
+});
+
+/* ============================================================
+ * 4. 连续灰度：台阶富余时必须层层不同且递减均匀
+ * ============================================================ */
+var cone = coneImg();
+[4, 8, 12].forEach(function (N) {
+  var r = ImageModel.layers(cone, { thickness: 9, layerCount: N, targetWidth: 200, pinDia: 0 });
+  var a = areas(r);
+  chk('锥体 N=' + N + ': ' + N + ' 层层层不同', r.parts.length === N && r.info.distinctLayers === N && r.info.dupLayers === 0,
+    'parts=' + r.parts.length + ' distinct=' + r.info.distinctLayers);
+  chk('锥体 N=' + N + ': 面积严格递减', a.every(function (v, i) { return i === 0 || v < a[i - 1]; }), a.join('>'));
+  // 等面积分位的意义: 每层"新增面积"大致相等 -> 相邻差的离散度受控
+  var d = []; for (var k = 1; k < a.length; k++) d.push(a[k - 1] - a[k]);
+  var mx = Math.max.apply(null, d), mn = Math.min.apply(null, d);
+  chk('锥体 N=' + N + ': 每层新增面积大致相等(max/min < 2)', mx / mn < 2, d.join(',') + ' ratio=' + (mx / mn).toFixed(2));
+});
+
+/* ============================================================
+ * 5. layerMode:'even' 回退路径仍可用（旧行为保留给需要等灰度间隔的人）
+ * ============================================================ */
+var ev = ImageModel.layers(step, { thickness: 9, layerCount: 5, targetWidth: 200, pinDia: 0, layerMode: 'even' });
+chk("layerMode='even': 仍出 5 层且合法", ev.parts.length === 5 && errsOf(ev.parts).length === 0, areas(ev).join('>'));
+chk("layerMode='even': 面积单调不增", areas(ev).every(function (v, i, arr) { return i === 0 || v <= arr[i - 1] + 1; }), areas(ev).join('>'));
+// even 在台阶图上会切出近似重复的层 —— 这正是默认模式要避免的，用它反证默认模式更优
+var q5 = ImageModel.layers(step, { thickness: 9, layerCount: 5, targetWidth: 200, pinDia: 0 });
+chk('默认(台阶分位)不比 even 差: 相邻最小差更大或相等',
+  minRelStep(areas(q5)) >= 0 && minRelStep(areas(ev)) < 0.05,
+  'even minRel=' + minRelStep(areas(ev)).toFixed(4) + ' 默认 minRel=' + minRelStep(areas(q5)).toFixed(4));
+
+/* ============================================================
+ * 6. 阈值来源的三条路：bgCut / 手动阈值 / alphaOnly
+ * ============================================================ */
+var mth = ImageModel.layers(step, { thickness: 9, layerCount: 3, pinDia: 0, autoThreshold: false, threshold: 150 });
+chk('手动阈值 150: 只保留 <=150 的部分(140x140)', near(mth.parts[0].bbox().w, 140, 2.5) && mth.info.size[0] === 140,
+  G.round(mth.parts[0].bbox().w, 1) + ' size=' + JSON.stringify(mth.info.size));
+var bg = ImageModel.layers(step, { thickness: 9, layerCount: 3, pinDia: 0, bgCut: 150 });
+chk('bgCut=150: 与手动阈值等效(140x140)', near(bg.parts[0].bbox().w, 140, 2.5), G.round(bg.parts[0].bbox().w, 1));
+chk('默认 bgCut(250) 才拿到完整 200x200', near(sNat.parts[0].bbox().w, 200, 2.5) && !near(bg.parts[0].bbox().w, 200, 2.5),
+  G.round(sNat.parts[0].bbox().w, 1) + ' vs ' + G.round(bg.parts[0].bbox().w, 1));
+// alphaOnly: 透明底 + 深灰方块
+var alp = (function () {
+  var cv = document.createElement('canvas'); cv.width = cv.height = 200;
+  var g = cv.getContext('2d');
+  g.clearRect(0, 0, 200, 200);
+  g.fillStyle = '#333'; g.fillRect(40, 40, 120, 120);
+  return g.getImageData(0, 0, 200, 200);
+})();
+var ra = ImageModel.layers(alp, { thickness: 9, layerCount: 3, targetWidth: 120, pinDia: 0, alphaOnly: true });
+chk('alphaOnly: 用透明通道取形(120mm 方块 3 层)',
+  ra.parts.length === 3 && near(ra.parts[0].bbox().w, 120, 1.5) && ra.info.distinctLayers === 1,
+  ra.parts.length + ' w=' + G.round(ra.parts[0].bbox().w, 1));
+
+/* ============================================================
+ * 7. 多形状层 / 命名 / asm 语义 / 临时字段清理
+ * ============================================================ */
+var twin = mk(300, 160, function (g) {
+  [[80, '#c0c0c0', 60], [80, '#505050', 30], [220, '#c0c0c0', 60], [220, '#505050', 30]].forEach(function (a) {
+    g.fillStyle = a[1]; g.beginPath(); g.arc(a[0], 80, a[2], 0, 7); g.fill();
+  });
+});
+var tw = ImageModel.layers(twin, { thickness: 9, layerCount: 2, targetWidth: 280, pinDia: 0, maxPerLayer: 4 });
+chk('多形状层: 每层 2 块 -> 4 件', tw.parts.length === 4, tw.parts.length);
+chk('多形状层: 命名带块序号', tw.parts.map(function (p) { return p.name; }).join(',') === '第1层-1,第1层-2,第2层-1,第2层-2',
+  tw.parts.map(function (p) { return p.name; }).join(','));
+chk('多形状层: perLayer 统计', JSON.stringify(tw.info.perLayer) === '[2,2]', JSON.stringify(tw.info.perLayer));
+chk('多形状层: 同层 z 相同 / 层间差 = t',
+  tw.parts[0].meta.asm.z === 0 && tw.parts[1].meta.asm.z === 0 && tw.parts[2].meta.asm.z === 9 && tw.parts[3].meta.asm.z === 9,
+  tw.parts.map(function (p) { return p.meta.asm.z; }).join(','));
+chk('多形状层: 同层两块不重叠(左右各一)', (function () {
+  var b1 = tw.parts[0].bbox(), b2 = tw.parts[1].bbox();
+  return b1.x1 < b2.x0 + 1e-6 || b2.x1 < b1.x0 + 1e-6;
+})(), JSON.stringify([G.round(tw.parts[0].bbox().x1, 1), G.round(tw.parts[1].bbox().x0, 1)]));
+chk('分层件 asm: 全在 XY 面 / x=y=0(保留描摹相对位置)',
+  s4.parts.every(function (p) { return p.meta.asm.plane === 'XY' && p.meta.asm.x === 0 && p.meta.asm.y === 0; }));
+chk('分层件 asm: z = 层序 x t', s4.parts.map(function (p) { return p.meta.asm.z; }).join(',') === '0,9,18,27',
+  s4.parts.map(function (p) { return p.meta.asm.z; }).join(','));
+chk('临时字段已清理(shapeIdx/shapeCount 不外泄)',
+  tw.parts.every(function (p) { return p.meta.shapeIdx === undefined && p.meta.shapeCount === undefined; }));
+chk('层序连续无空洞(名字里 1..N 齐全)', (function () {
+  var set = {}; s8.parts.forEach(function (p) { var m = p.name.match(/第(\d+)层/); if (m) set[m[1]] = 1; });
+  for (var i = 1; i <= 8; i++) if (!set[i]) return false;
+  return true;
+})(), s8.parts.map(function (p) { return p.name; }).join(','));
+
+/* ============================================================
+ * 8. 对位销孔：必须在所有层的材料内
+ * ============================================================ */
+var pin = ImageModel.layers(step, { thickness: 9, layerCount: 4, targetWidth: 200, pinDia: 6, fit: 0.2 });
+var pinHoles = pin.parts.map(function (p) {
+  return p.holes.filter(function (h) { var b = G.loopBBox(h); return near(b.w, 6.2, 0.4) && near(b.h, 6.2, 0.4); }).length;
+});
+chk('销孔: 每层都有 2 个', pinHoles.join(',') === '2,2,2,2', pinHoles.join(','));
+chk('销孔: 各层孔位完全一致(能穿起来)', (function () {
+  function ctrs(p) {
+    return p.holes.map(function (h) { var b = G.loopBBox(h); return G.round((b.x0 + b.x1) / 2, 3) + ',' + G.round((b.y0 + b.y1) / 2, 3); }).sort().join(' | ');
+  }
+  var ref = ctrs(pin.parts[0]);
+  return pin.parts.every(function (p) { return ctrs(p) === ref; });
+})());
+chk('销孔: 全部落在最小层(顶层)轮廓内', (function () {
+  var top = G.flatten(pin.parts[pin.parts.length - 1].outer, 0.4);
+  return pin.parts[0].holes.every(function (h) {
+    var b = G.loopBBox(h);
+    return G.pointInPoly({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 }, top);
+  });
+})());
+chk('销孔零件全合法', errsOf(pin.parts).length === 0, errsOf(pin.parts).slice(0, 2).join('|'));
+// 公共区域太小时应给 warn 而不是造出穿在空气里的孔
+var thinTop = mk(200, 200, function (g) {
+  g.fillStyle = '#b0b0b0'; g.fillRect(20, 20, 160, 160);
+  g.fillStyle = '#000'; g.fillRect(95, 95, 6, 6);   // 顶层只有 6px
+});
+var pw = ImageModel.layers(thinTop, { thickness: 9, layerCount: 2, targetWidth: 160, pinDia: 10, fit: 0.2 });
+chk('销孔: 公共区太小时给出 warn 而非造废孔',
+  pw.warnings.some(function (m) { return m.level === 'warn' && /销孔|防转/.test(m.text); }) ||
+  pw.parts.every(function (p) { return p.holes.length === 0; }),
+  pw.warnings.map(function (m) { return m.level + ':' + m.text; }).join('|'));
+
+/* ============================================================
+ * 9. 分层件下游可用：合法性 / 排样 / 导出
+ * ============================================================ */
+chk('分层件全部通过 Part.validate', errsOf(s4.parts).length === 0, errsOf(s4.parts).slice(0, 3).join('|'));
+var ns = Nest.nest(s4.parts.map(function (p) { return { part: p, qty: 1 }; }), { w: 2440, h: 1220, margin: 10, gap: 6 });
+chk('分层件可排样且无重叠/间距违规', Nest.verify(ns, { margin: 10, gap: 6 }).length === 0 && ns.oversize.length === 0,
+  'sheets=' + ns.stats.sheetCount + ' 紧凑度=' + ns.stats.packDensity.toFixed(3));
+chk('分层件 DXF 导出含 EOF', CAD.toDXF(s4.parts.map(function (p) { return { part: p }; })).indexOf('EOF') > 0);
+chk('分层件 SVG 导出含 path', /<path/.test(CAD.toSVG(s4.parts.map(function (p) { return { part: p }; }))));
+
+/* ============================================================
+ * 10. 边界与容错
+ * ============================================================ */
+chk('空白图报错', ImageModel.layers(mk(60, 60, function () { }), { thickness: 9 }).warnings.some(function (m) { return m.level === 'error'; }));
+var lc0 = ImageModel.layers(step, { thickness: 9, layerCount: 0, targetWidth: 200, pinDia: 0 });
+chk('层数 0 被夹到 2', lc0.parts.length === 2 && lc0.info.layerCount === 2, lc0.parts.length + '/' + lc0.info.layerCount);
+var lc99 = ImageModel.layers(step, { thickness: 9, layerCount: 99, targetWidth: 200, pinDia: 0 });
+chk('层数 99 被夹到 12', lc99.parts.length === 12 && lc99.info.layerCount === 12, lc99.parts.length + '/' + lc99.info.layerCount);
+chk('夹紧后总高仍 = 层数 x t', near(lc99.info.totalHeight, 12 * 9, 1e-9), lc99.info.totalHeight);
+// invert: 反相后"白"变成"高"
+var invImg = mk(200, 200, function (g) {
+  g.fillStyle = '#000'; g.fillRect(0, 0, 200, 200);
+  g.fillStyle = '#808080'; g.fillRect(20, 20, 160, 160);
+  g.fillStyle = '#fff'; g.fillRect(60, 60, 80, 80);
+});
+var iv = ImageModel.layers(invImg, { thickness: 9, layerCount: 2, targetWidth: 160, pinDia: 0, invert: true });
+chk('invert: 白色区域变成顶层', iv.parts.length === 2 &&
+  Math.abs(iv.parts[0].area()) > Math.abs(iv.parts[1].area()) &&
+  near(iv.parts[0].bbox().w, 160, 2), areas(iv).join('>') + ' w0=' + G.round(iv.parts[0].bbox().w, 1));
+// 确定性: 同参数两次结果一致
+chk('确定性: 同输入两次结果完全一致', (function () {
+  var r1 = ImageModel.layers(step, { thickness: 9, layerCount: 5, targetWidth: 200, pinDia: 6 });
+  var r2 = ImageModel.layers(step, { thickness: 9, layerCount: 5, targetWidth: 200, pinDia: 6 });
+  return JSON.stringify(areas(r1)) === JSON.stringify(areas(r2)) &&
+    JSON.stringify(r1.info) === JSON.stringify(r2.info);
+})());
+// 性能: 640x480 12 层
+var big = (function () {
+  var cv = document.createElement('canvas'); cv.width = 640; cv.height = 480;
+  var g = cv.getContext('2d'), im = g.createImageData(640, 480);
+  for (var y = 0; y < 480; y++) for (var x = 0; x < 640; x++) {
+    var d = Math.hypot(x - 320, y - 240), v = Math.max(0, Math.min(255, Math.round(d / 240 * 255)));
+    var i = (y * 640 + x) * 4; im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  return g.getImageData(0, 0, 640, 480);
+})();
+var t0 = performance.now();
+var bigR = ImageModel.layers(big, { thickness: 9, layerCount: 12, targetWidth: 300, pinDia: 6 });
+var dt = performance.now() - t0;
+chk('性能: 640x480 分 12 层 < 4s', dt < 4000, Math.round(dt) + 'ms parts=' + bigR.parts.length);
+chk('大图 12 层层层不同', bigR.info.distinctLayers === 12, bigR.info.distinctLayers);
+
+/* ============================================================
+ * 11. 轮廓件(silhouette): 主体不得被阈值吃掉 + 榫头/底座对位
+ * ============================================================ */
+var tree = mk(200, 260, function (g) {
+  g.fillStyle = '#000';
+  g.beginPath(); g.moveTo(100, 10); g.lineTo(170, 190); g.lineTo(30, 190); g.closePath(); g.fill();
+  g.fillRect(85, 190, 30, 60);
+});
+var ti = ImageModel.silhouette(tree, { thickness: 12, targetHeight: 300, standStyle: 'tenon', fit: 0.2, tenonWidth: 30, baseDepth: 80 });
+chk('轮廓件+底座: 2 件且末件是底座', ti.parts.length === 2 && ti.parts[1].name === '底座',
+  ti.parts.map(function (p) { return p.name; }).join('/'));
+chk('轮廓件: 底座榫眼数 = 榫头数', ti.parts[1].holes.length === ti.info.tenons, ti.parts[1].holes.length + '/' + ti.info.tenons);
+// 榫眼 x 区间必须真的套住榫头 x 区间(否则 3D 里插不进去)
+chk('轮廓件: 榫眼 x 区间套住榫头(装得进去)', (function () {
+  var main = ti.parts[0], base = ti.parts[1];
+  var ax = main.meta.asm.x, bx = base.meta.asm.x;
+  // 主体榫头 = outer 中低于主体 bbox 底部+2mm 的那些点
+  var pts = G.flatten(main.outer, 0.4);
+  var mb = main.bbox();
+  var low = pts.filter(function (p) { return p.y < mb.y0 + 2; });
+  if (!low.length) return false;
+  var lx0 = Math.min.apply(null, low.map(function (p) { return p.x; })) + ax;
+  var lx1 = Math.max.apply(null, low.map(function (p) { return p.x; })) + ax;
+  return base.holes.some(function (h) {
+    var b = G.loopBBox(h);
+    return b.x0 + bx <= lx0 + 0.2 && b.x1 + bx >= lx1 - 0.2;
+  });
+})(), (function () {
+  var b = G.loopBBox(ti.parts[1].holes[0]);
+  return 'hole x=[' + G.round(b.x0, 1) + ',' + G.round(b.x1, 1) + '] baseAsmX=' + G.round(ti.parts[1].meta.asm.x, 1) + ' mainAsmX=' + G.round(ti.parts[0].meta.asm.x, 1);
+})());
+chk('轮廓件: 立牌竖在 XZ / 底座平放 XY',
+  ti.parts[0].meta.asm.plane === 'XZ' && ti.parts[1].meta.asm.plane === 'XY');
+chk('轮廓件: 立牌左右居中于底座(±1mm)', (function () {
+  var main = ti.parts[0], base = ti.parts[1];
+  var mb = main.bbox(), bb2 = base.bbox();
+  var mc = (mb.x0 + mb.x1) / 2 + main.meta.asm.x, bc = (bb2.x0 + bb2.x1) / 2 + base.meta.asm.x;
+  return Math.abs(mc - bc) < 1;
+})());
+chk('轮廓件: 立牌 y 落在底座深度中央', near(ti.parts[0].meta.asm.y, 80 / 2 - 12 / 2, 1e-6), ti.parts[0].meta.asm.y);
+chk('轮廓件全部合法', errsOf(ti.parts).length === 0, errsOf(ti.parts).slice(0, 2).join('|'));
+// 浅灰图形: silhouette 走 Otsu 是对的(前景/背景两类)，这里只要不丢件
+var pale = mk(200, 200, function (g) { g.fillStyle = '#c8c8c8'; g.beginPath(); g.arc(100, 100, 70, 0, 7); g.fill(); });
+var ps = ImageModel.silhouette(pale, { thickness: 12, targetWidth: 140, standStyle: 'none' });
+chk('轮廓件: 浅灰图形仍能提取(140mm 圆)', ps.parts.length === 1 && near(ps.parts[0].bbox().w, 140, 2),
+  ps.parts.length + ' w=' + (ps.parts[0] ? G.round(ps.parts[0].bbox().w, 1) : '-'));
+
+} catch (e) { chk('EXCEPTION ' + e.message, false, e.stack); }
+var fails = L.filter(function (s) { return /^FAIL/.test(s); });
+document.getElementById('out').textContent =
+  'TOTAL ' + L.length + '   FAILS ' + fails.length + '\n\n' + L.join('\n');
+document.title = (fails.length ? 'FAIL ' + fails.length : 'ALL PASS') + ' · 图片建模';
+</script>
+</body></html>

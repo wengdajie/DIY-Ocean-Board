@@ -1,0 +1,259 @@
+<!doctype html><meta charset="utf-8"><body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/imagetrace.js"></script>
+<script>
+var L = [];
+function chk(n, c, e) { L.push((c ? 'PASS ' : 'FAIL ') + n + (e !== undefined ? '  [' + e + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+
+// 造图: draw(ctx) 在白底上画黑色形状
+function mk(w, h, draw) {
+  var cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  var g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#000';
+  draw(g);
+  return g.getImageData(0, 0, w, h);
+}
+try {
+// ---------- Otsu ----------
+var img = mk(100, 100, function (g) { g.fillRect(20, 20, 40, 40); });
+var gray = Trace.grayFrom(img);
+var t = Trace.otsu(gray);
+chk('otsu 分离黑白', t > 30 && t < 220, t);
+var m = Trace.maskFrom(img, {});
+chk('mask 面积 = 40x40', Trace.maskArea(m) === 1600, Trace.maskArea(m));
+var bb = Trace.maskBBox(m);
+chk('mask bbox', bb.x0 === 20 && bb.y0 === 20 && bb.w === 40 && bb.h === 40, JSON.stringify(bb));
+
+// ---------- 裂缝追踪: 矩形 ----------
+var loops = Trace.traceMask(m);
+chk('矩形 -> 1 个环', loops.length === 1, loops.length);
+chk('矩形环周长点数(未简化)=160', loops[0].length === 160, loops[0].length);
+var sp = Trace.simplifyClosed(loops[0], 0.5);
+chk('简化后 4 个角点', sp.length === 4, sp.length + ' ' + JSON.stringify(sp));
+chk('角点精确(像素缝)', Math.abs(G.signedArea(sp)) === 1600, Math.abs(G.signedArea(sp)));
+
+// ---------- 带孔: 环形 ----------
+var ring = mk(100, 100, function (g) {
+  g.fillRect(10, 10, 80, 80);
+  g.fillStyle = '#fff'; g.fillRect(30, 30, 40, 40);
+});
+var rm = Trace.maskFrom(ring, {});
+chk('环形面积 = 6400-1600', Trace.maskArea(rm) === 80 * 80 - 40 * 40, Trace.maskArea(rm));
+var rl = Trace.traceMask(rm);
+chk('环形 -> 2 个环', rl.length === 2, rl.length);
+var areas = rl.map(function (l) { return G.signedArea(Trace.simplifyClosed(l, 0.5)); });
+chk('两环绕向相反', (areas[0] > 0) !== (areas[1] > 0), JSON.stringify(areas));
+chk('外环面积 6400 / 内环 1600', areas.map(Math.abs).sort(function (a, b) { return b - a; }).join(',') === '6400,1600', JSON.stringify(areas));
+
+// ---------- loopsToShapes: 孔归属 + y 翻转 + 缩放 ----------
+var shapes = Trace.loopsToShapes(rl.map(function (l) { return Trace.simplifyClosed(l, 0.5); }), { scale: 2, imgH: 100 });
+chk('1 个形状', shapes.length === 1, shapes.length);
+chk('该形状有 1 个孔', shapes[0].holes.length === 1, shapes[0].holes.length);
+chk('外轮廓 CCW', G.loopArea(shapes[0].outer) > 0, G.loopArea(shapes[0].outer));
+chk('孔 CW', G.loopArea(shapes[0].holes[0]) < 0, G.loopArea(shapes[0].holes[0]));
+chk('缩放 x2 -> 外轮廓 160x160', near(G.loopBBox(shapes[0].outer).w, 160, 1e-9) && near(G.loopBBox(shapes[0].outer).h, 160, 1e-9), G.loopBBox(shapes[0].outer).w);
+var sb = G.loopBBox(shapes[0].outer);
+chk('y 翻转正确(顶部 y=180)', near(sb.y1, (100 - 10) * 2, 1e-9), sb.y1);
+
+// ---------- 多个不相连的形状 ----------
+var two = mk(120, 60, function (g) { g.fillRect(10, 10, 30, 40); g.fillRect(70, 10, 40, 40); });
+var tm = Trace.maskFrom(two, {});
+var ts = Trace.loopsToShapes(Trace.traceMask(tm).map(function (l) { return Trace.simplifyClosed(l, 0.5); }), { scale: 1, imgH: 60 });
+chk('2 个独立形状', ts.length === 2, ts.length);
+chk('按面积降序(大的在前)', G.loopArea(ts[0].outer) >= G.loopArea(ts[1].outer), [G.loopArea(ts[0].outer), G.loopArea(ts[1].outer)]);
+
+// ---------- 对角相接不应误连 ----------
+var diag = mk(20, 20, function (g) { g.fillRect(4, 4, 4, 4); g.fillRect(8, 8, 4, 4); });
+var dm = Trace.maskFrom(diag, {});
+var dl = Trace.traceMask(dm);
+chk('对角相接: 环数合理(1或2)', dl.length >= 1 && dl.length <= 2, dl.length);
+var dsum = dl.reduce(function (a, l) { return a + Math.abs(G.signedArea(Trace.simplifyClosed(l, 0.5))); }, 0);
+chk('对角面积守恒 = 32', near(dsum, 32, 1e-9), dsum);
+
+// ---------- 去噪 ----------
+var noisy = mk(100, 100, function (g) {
+  g.fillRect(20, 20, 50, 50);
+  g.fillRect(85, 5, 2, 2);              // 小噪点
+  g.fillStyle = '#fff'; g.fillRect(30, 30, 3, 3);  // 小孔
+});
+var nm = Trace.maskFrom(noisy, {});
+chk('去噪前有噪点', Trace.traceMask(nm).length === 3, Trace.traceMask(nm).length);
+Trace.despeckle(nm, 20, 20);
+var nl = Trace.traceMask(nm);
+chk('去噪后只剩主体', nl.length === 1, nl.length);
+chk('去噪后面积 = 2500(小孔已填)', Trace.maskArea(nm) === 2500, Trace.maskArea(nm));
+
+// ---------- invert / alphaOnly ----------
+var iv = Trace.maskFrom(img, { invert: true });
+chk('invert 取白色为材料', Trace.maskArea(iv) === 10000 - 1600, Trace.maskArea(iv));
+var acv = document.createElement('canvas');
+acv.width = acv.height = 50;
+var ag = acv.getContext('2d');
+ag.clearRect(0, 0, 50, 50);
+ag.fillStyle = 'rgba(255,0,0,1)'; ag.fillRect(10, 10, 20, 20);
+var aimg = ag.getImageData(0, 0, 50, 50);
+var am = Trace.maskFrom(aimg, { alphaOnly: true });
+chk('alphaOnly 用透明度', Trace.maskArea(am) === 400, Trace.maskArea(am));
+// 透明背景 + 非 alphaOnly: 透明按白处理 -> 红色方块是材料
+var am2 = Trace.maskFrom(aimg, {});
+chk('透明背景按白处理', Trace.maskArea(am2) === 400, Trace.maskArea(am2));
+
+// ---------- 手动阈值 ----------
+var grad = mk(60, 60, function (g) {
+  g.fillStyle = '#333'; g.fillRect(0, 0, 20, 60);
+  g.fillStyle = '#aaa'; g.fillRect(20, 0, 20, 60);
+});
+var lo = Trace.maskFrom(grad, { threshold: 100 });   // 只有 #333 是材料
+var hi = Trace.maskFrom(grad, { threshold: 200 });   // #333 和 #aaa 都是
+chk('低阈值只取深色', Trace.maskArea(lo) === 20 * 60, Trace.maskArea(lo));
+chk('高阈值取更多', Trace.maskArea(hi) === 40 * 60, Trace.maskArea(hi));
+
+// ---------- padMask / paintRect ----------
+var pm = Trace.padMask(Trace.maskFrom(img, {}), 10);
+chk('padMask 尺寸 +20', pm.w === 120 && pm.h === 120, pm.w + 'x' + pm.h);
+chk('padMask 面积不变', Trace.maskArea(pm) === 1600, Trace.maskArea(pm));
+var pbb = Trace.maskBBox(pm);
+chk('padMask 平移 +10', pbb.x0 === 30 && pbb.y0 === 30, JSON.stringify(pbb));
+Trace.paintRect(pm, 0, 0, 10, 10, 1);
+chk('paintRect 加料', Trace.maskArea(pm) === 1700, Trace.maskArea(pm));
+Trace.paintRect(pm, 0, 0, 10, 10, 0);
+chk('paintRect 去料', Trace.maskArea(pm) === 1600, Trace.maskArea(pm));
+
+// ---------- 开槽导致拓扑分裂: 追踪器应给出 2 个环 ----------
+var split = Trace.maskFrom(mk(60, 60, function (g) { g.fillRect(10, 10, 40, 40); }), {});
+Trace.paintRect(split, 0, 28, 60, 32, 0);   // 横向切断
+var sl = Trace.traceMask(split);
+chk('切断后 -> 2 个独立环', sl.length === 2, sl.length);
+var ssum = sl.reduce(function (a, l) { return a + Math.abs(G.signedArea(Trace.simplifyClosed(l, 0.5))); }, 0);
+chk('切断后面积守恒', near(ssum, Trace.maskArea(split), 1e-9), ssum + '/' + Trace.maskArea(split));
+
+// ---------- bottomSpans (自动找着地点) ----------
+var legs = Trace.maskFrom(mk(100, 60, function (g) {
+  g.fillRect(10, 10, 80, 20);          // 横梁
+  g.fillRect(15, 30, 15, 25);          // 左腿
+  g.fillRect(70, 30, 15, 25);          // 右腿
+}), {});
+var bs = Trace.bottomSpans(legs, 2);
+chk('找到 2 个着地区间', bs.spans.length === 2, JSON.stringify(bs.spans));
+chk('着地区间宽度 15', bs.spans[0][1] - bs.spans[0][0] === 15, bs.spans[0][1] - bs.spans[0][0]);
+chk('baseY = 55', bs.baseY === 55, bs.baseY);
+
+// ---------- 简化保真度: 圆 ----------
+var circ = mk(200, 200, function (g) { g.beginPath(); g.arc(100, 100, 70, 0, 7); g.fill(); });
+var cm = Trace.maskFrom(circ, {});
+var cl = Trace.traceMask(cm);
+chk('圆 -> 1 环', cl.length === 1, cl.length);
+var raw = cl[0].length;
+var s1 = Trace.simplifyClosed(cl[0], 1.0);
+chk('简化大幅减点', s1.length < raw / 4, raw + ' -> ' + s1.length);
+var aC = Math.abs(G.signedArea(s1)), aTrue = Math.PI * 70 * 70;
+chk('简化后面积误差 < 2%', Math.abs(aC - aTrue) / aTrue < 0.02, (Math.abs(aC - aTrue) / aTrue * 100).toFixed(2) + '%');
+// 简化容差越大, 点越少
+chk('容差单调', Trace.simplifyClosed(cl[0], 3).length <= s1.length);
+chk('容差 0 = 不简化', Trace.simplifyClosed(cl[0], 0).length === raw);
+
+// ---------- 空图 ----------
+var blank = Trace.maskFrom(mk(40, 40, function () { }), {});
+chk('空图无环', Trace.traceMask(blank).length === 0, Trace.traceMask(blank).length);
+chk('空图 bbox null', Trace.maskBBox(blank) === null);
+chk('空图 shapes 为空', Trace.loopsToShapes([], { scale: 1, imgH: 40 }).length === 0);
+
+/* ---------- 保角平滑 smoothLoop / refineLoop ----------
+ * 核心诉求: 把像素锯齿抹平的同时 **不能吃掉结构拐角**(星角/直角), 且面积要守恒。
+ */
+function polyArea(pts) { return Math.abs(G.signedArea(pts)); }
+
+// 矩形: 平滑后必须仍是 4 个点、面积/包围盒分毫不差(直角是硬约束)
+var rectM = Trace.maskFrom(mk(200, 120, function (g) { g.fillRect(20, 20, 160, 80); }), {});
+var rectL = Trace.traceMask(rectM)[0];
+var rectS = Trace.refineLoop(rectL, 1.0);
+chk('平滑: 矩形仍 4 点', rectS.length === 4, rectS.length);
+chk('平滑: 矩形面积不变', near(polyArea(rectS), 160 * 80, 1e-9), polyArea(rectS));
+var rbb = G.loopBBox(rectS);
+chk('平滑: 矩形包围盒不变', rbb.w === 160 && rbb.h === 80, rbb.w + 'x' + rbb.h);
+
+// 十字(有 4 个内凹角): 12 点必须保住, 否则内凹角被磨圆 -> 搭接失效
+var crossM = Trace.maskFrom(mk(200, 200, function (g) { g.fillRect(80, 20, 40, 160); g.fillRect(20, 80, 160, 40); }), {});
+var crossS = Trace.refineLoop(Trace.traceMask(crossM)[0], 1.0);
+chk('平滑: 十字仍 12 点(保内凹角)', crossS.length === 12, crossS.length);
+chk('平滑: 十字面积不变', near(polyArea(crossS), 40 * 160 * 2 - 40 * 40, 1e-9), polyArea(crossS));
+
+// 五角星: 这是这套机制的动机 —— 斜边锯齿让 DP 留下 90 个点
+var starM = Trace.maskFrom(mk(300, 300, function (g) {
+  g.beginPath();
+  for (var k = 0; k < 10; k++) {
+    var a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? 55 : 130;
+    var x = 150 + rr * Math.cos(a), y = 150 + rr * Math.sin(a);
+    k ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.closePath(); g.fill();
+}), {});
+var starRaw = Trace.traceMask(starM)[0];
+var starTrue = (function () {
+  var pts = [];
+  for (var k = 0; k < 10; k++) {
+    var a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? 55 : 130;
+    pts.push(G.P(150 + rr * Math.cos(a), 150 + rr * Math.sin(a)));
+  }
+  return polyArea(pts);
+})();
+var starDP = Trace.simplifyClosed(starRaw, 1.0);
+var starSM = Trace.refineLoop(starRaw, 1.0);
+chk('平滑: 星形点数大幅下降', starSM.length < starDP.length / 4, starDP.length + ' -> ' + starSM.length);
+chk('平滑: 星形点数接近 10', starSM.length >= 10 && starSM.length <= 16, starSM.length);
+chk('平滑: 星形面积误差 < 1%', Math.abs(polyArea(starSM) - starTrue) / starTrue < 0.01,
+  (Math.abs(polyArea(starSM) - starTrue) / starTrue * 100).toFixed(2) + '%');
+/* 10 个真实尖角都必须"还在"。不数点数(尖端偶尔留 2 个相邻点),
+ * 而是逐个真实顶点找最近的输出点, 距离必须够小。 */
+var starVerts = [];
+for (var kv = 0; kv < 10; kv++) {
+  var av = -Math.PI / 2 + kv * Math.PI / 5, rv = kv % 2 ? 55 : 130;
+  starVerts.push(G.P(150 + rv * Math.cos(av), 150 + rv * Math.sin(av)));
+}
+var worstV = 0;
+starVerts.forEach(function (v) {
+  var best = Infinity;
+  starSM.forEach(function (q) { best = Math.min(best, Math.hypot(q.x - v.x, q.y - v.y)); });
+  if (best > worstV) worstV = best;
+});
+chk('平滑: 10 个尖角全部保住(最大偏差 < 2.5px)', worstV < 2.5, G.round(worstV, 2));
+var rads = starSM.map(function (p) { return Math.hypot(p.x - 150, p.y - 150); });
+chk('平滑: 5 个内凹角保留', rads.filter(function (r) { return r < 70; }).length === 5,
+  rads.map(function (r) { return Math.round(r); }).join(','));
+
+// 圆: 保真度不能被平滑破坏
+var cirM = Trace.maskFrom(mk(300, 300, function (g) { g.beginPath(); g.arc(150, 150, 120, 0, 7); g.fill(); }), {});
+var cirSM = Trace.refineLoop(Trace.traceMask(cirM)[0], 1.0);
+var cirTrue = Math.PI * 120 * 120;
+chk('平滑: 圆面积误差 < 1%', Math.abs(polyArea(cirSM) - cirTrue) / cirTrue < 0.01,
+  (Math.abs(polyArea(cirSM) - cirTrue) / cirTrue * 100).toFixed(2) + '%');
+chk('平滑: 圆点数合理', cirSM.length >= 20 && cirSM.length <= 60, cirSM.length);
+
+// smooth=false 必须等价于纯 DP
+chk('refineLoop(smooth=false) == simplifyClosed',
+  JSON.stringify(Trace.refineLoop(starRaw, 1.0, false)) === JSON.stringify(starDP));
+// 短环/零容差原样返回
+chk('平滑: 点太少原样返回', Trace.smoothLoop([G.P(0, 0), G.P(1, 0), G.P(1, 1)], 1).length === 3);
+chk('平滑: 容差 0 原样返回', Trace.smoothLoop(starRaw, 0).length === starRaw.length);
+// 幂等性: 再平滑一次结果稳定(不会持续收缩)
+var a1 = polyArea(Trace.refineLoop(starRaw, 1.0));
+var a2 = polyArea(Trace.refineLoop(Trace.refineLoop(starRaw, 1.0), 1.0));
+chk('平滑: 二次处理不持续收缩', Math.abs(a2 - a1) / a1 < 0.01, G.round(a1, 0) + ' -> ' + G.round(a2, 0));
+// 带孔的形状: 孔的绕向不能被平滑改变
+var holeM = Trace.maskFrom(mk(200, 200, function (g) {
+  g.fillRect(20, 20, 160, 160); g.fillStyle = '#fff'; g.beginPath(); g.arc(100, 100, 45, 0, 7); g.fill();
+}), {});
+var hLoops = Trace.traceMask(holeM).map(function (l) { return Trace.refineLoop(l, 1.0); });
+var hShapes = Trace.loopsToShapes(hLoops, { scale: 1, imgH: 200 });
+chk('平滑后仍能正确归孔', hShapes.length === 1 && hShapes[0].holes.length === 1,
+  hShapes.length + '/' + (hShapes[0] ? hShapes[0].holes.length : 0));
+chk('平滑后外轮廓 CCW', G.signedArea(hShapes[0].outer) > 0);
+chk('平滑后孔 CW', G.signedArea(hShapes[0].holes[0]) < 0);
+
+} catch (e) { L.push('FAIL exception ' + e.message + '\n' + (e.stack || '')); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>

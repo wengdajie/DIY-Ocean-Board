@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>shot</title>
+<body style="margin:0;background:#0f1216">
+<iframe id="fr" src="../index.html" style="width:1600px;height:1000px;border:0"></iframe>
+<script>
+window.onload = function () {
+  setTimeout(function () {
+    var d = document.getElementById('fr').contentWindow.document;
+    var q = new URLSearchParams(location.search);
+    var pane = q.get('pane') || 'nest';
+    var model = q.get('model');
+    if (model) d.querySelector('.chip[data-model="' + model + '"]').click();
+    var mc = q.get('machine');
+    if (mc) { d.getElementById('machine').value = mc; d.getElementById('machine').dispatchEvent(new Event('change')); }
+    var js = q.get('joint');
+    if (js) { d.getElementById('jointStyle').value = js; d.getElementById('jointStyle').dispatchEvent(new Event('change')); }
+    d.querySelector('.tab[data-pane="' + pane + '"]').click();
+    setTimeout(function(){ document.title = 'READY'; }, 350);
+  }, 900);
+};
+</script>

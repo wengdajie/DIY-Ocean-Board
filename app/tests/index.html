@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>测试总控 · 海洋板 CAD</title>
+<style>
+body{font:13px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;background:#0f1216;color:#e6edf3;margin:0;padding:20px}
+h1{font-size:17px;margin:0 0 4px}
+p.sub{color:#8b98a5;margin:0 0 18px;font-size:12px}
+table{border-collapse:collapse;width:100%;max-width:820px}
+th,td{border:1px solid #2b333d;padding:7px 11px;text-align:left}
+th{background:#1e242c;color:#8b98a5;font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+.ok{color:#35c88f;font-weight:600}.bad{color:#ef5f5f;font-weight:600}.run{color:#e5a54b}
+#sum{margin:16px 0;padding:11px 14px;border-radius:7px;background:#1e242c;border-left:3px solid #4ea1ff;max-width:820px}
+a{color:#4ea1ff}
+#frames{position:fixed;left:-4000px;top:0;width:1500px;height:960px;overflow:hidden}
+iframe{width:1500px;height:950px;border:0}
+</style></head>
+<body>
+<h1>海洋板 CAD 生成器 · 测试总控</h1>
+<p class="sub">全部测试在浏览器内运行，无需服务器。点击测试名可单独打开查看每条断言。另有 <code>tools/verify_exports.py</code> 的2484 项外部交叉校验。</p>
+<div id="sum">正在运行…</div>
+<table><thead><tr><th>测试套件</th><th>覆盖内容</th><th style="text-align:right">通过</th><th style="text-align:right">失败</th><th>结果</th></tr></thead>
+<tbody id="tb"></tbody></table>
+<div id="frames"></div>
+<script>
+var SUITES = [
+  ['test-geom.html', '几何内核: 圆弧/bulge、精确面积与包围盒、偏移补偿、变换、自交检测'],
+  ['test-joints.html', '榫卯引擎: 11 种接合方式 + 能力矩阵 + 分格互补 + 榫眼/燕尾 + dogbone/T-bone 让位'],
+  ['test-models.html', 'build 型结构(5 种) + 零件校验 + DXF/SVG/CSV 导出 + 排样算法'],
+  ['test-nest.html', '排样引擎: 25 策略比选、不重叠/不越界/间距达标、纹理锁定、最大剩料整料'],
+  ['test-mate.html', '装配配合: 榫与眼逐个对位、间隙=fit、燕尾自锁、搭接槽深'],
+  ['test-trace.html', '图片描摹: Otsu 阈值、连通域、去噪、裂缝追踪、简化、保角平滑'],
+  ['test-relief.html', '让位(小耳朵): 栅格化刀具可达性、T-bone 耳长2r、短边预算、过切角=180+转角'],
+  ['test-image.html', '图片建模: 分层不丢底层/台阶不重复/叠厚度语义/销孔共区域/轮廓件榛头对位'],
+  ['test-custom.html', '自定义: 加工特征库/清单表/16 配方/全参数扫描 3168 组/mirrorProf 弧归属/搭接开口相反'],
+  ['test-e2e.html', '端到端 UI: 全配方切换、图片上传、板位表与三视图拖拽、参数联动、导出路径选择 7 分支、极端值'],
+  ['test-visual.html', '像素级渲染: 挖孔/铣槽虚线/纹理方向/三视图高亮/暖白主题 WCAG/可拖拽布局真重绘']
+];
+var tb = document.getElementById('tb'), done = 0, tp = 0, tf = 0;
+SUITES.forEach(function (s, i) {
+  var tr = document.createElement('tr');
+  tr.innerHTML = '<td><a href="' + s[0] + '" target="_blank">' + s[0] + '</a></td><td style="color:#8b98a5">' + s[1] +
+    '</td><td class="n" id="p' + i + '">—</td><td class="n" id="f' + i + '">—</td><td class="run" id="r' + i + '">运行中…</td>';
+  tb.appendChild(tr);
+  var fr = document.createElement('iframe');
+  fr.src = s[0];
+  fr.onload = function () {
+    setTimeout(function () { collect(fr, i); }, /e2e|visual/.test(s[0]) ? 3400 : 1600);
+  };
+  document.getElementById('frames').appendChild(fr);
+});
+function collect(fr, i) {
+  var txt = '';
+  try { txt = fr.contentDocument.getElementById('out').textContent || ''; } catch (e) { }
+  var m = txt.match(/TOTAL (\d+)\s+FAILS (\d+)/);
+  var total = m ? +m[1] : 0, fails = m ? +m[2] : -1;
+  var pass = fails >= 0 ? total - fails : 0;
+  document.getElementById('p' + i).textContent = pass;
+  document.getElementById('f' + i).textContent = fails < 0 ? '?' : fails;
+  var r = document.getElementById('r' + i);
+  r.className = fails === 0 ? 'ok' : 'bad';
+  r.textContent = fails === 0 ? '全部通过' : (fails < 0 ? '未取到结果' : fails + ' 项失败');
+  tp += pass; if (fails > 0) tf += fails;
+  if (++done === SUITES.length) {
+    var el = document.getElementById('sum');
+    el.innerHTML = '<b style="font-size:15px" class="' + (tf ? 'bad' : 'ok') + '">' +
+      (tf ? '✕ ' + tf + ' 项失败' : '✓ 全部通过') + '</b> — 共 <b>' + (tp + tf) + '</b> 条断言，通过 <b>' + tp + '</b> 条。';
+    el.style.borderLeftColor = tf ? '#ef5f5f' : '#35c88f';
+    document.title = (tf ? 'FAIL ' + tf : 'ALL PASS') + ' · 测试总控';
+  }
+}
+</script>
+</body></html>

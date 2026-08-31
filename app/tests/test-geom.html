@@ -1,0 +1,98 @@
+<!doctype html><meta charset="utf-8">
+<body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script>
+var L = [];
+function log(s) { L.push(s); }
+function chk(name, cond, extra) { log((cond ? 'PASS ' : 'FAIL ') + name + (extra !== undefined ? '  [' + extra + ']' : '')); }
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+try {
+// 1. 矩形
+var r = G.rect(0, 0, 100, 50);
+chk('rect area=5000 CCW', near(G.loopArea(r), 5000, 0.01), G.loopArea(r));
+chk('rect perim=300', near(G.loopLength(r), 300, 1e-9), G.loopLength(r));
+
+// 2. 圆
+var c = G.circle(10, 20, 40);
+chk('circle area exact', near(G.loopArea(c), Math.PI * 400, 1e-9), G.loopArea(c));
+chk('circle perim', near(G.loopLength(c), Math.PI * 40, 1e-6), G.loopLength(c));
+var cb = G.loopBBox(c);
+chk('circle bbox', near(cb.w, 40, 0.05) && near(cb.h, 40, 0.05) && near(cb.cx, 10, 1e-6), [cb.w, cb.h, cb.cx, cb.cy]);
+
+// 3. 圆角矩形
+var rr = G.roundRect(0, 0, 100, 60, 10);
+chk('roundRect area exact', near(G.loopArea(rr), 100 * 60 - (4 - Math.PI) * 100, 1e-9), G.loopArea(rr));
+var rb = G.loopBBox(rr);
+chk('roundRect bbox', near(rb.w, 100, 0.02) && near(rb.h, 60, 0.02), [rb.w, rb.h]);
+
+// 4. 圆弧 bulge
+var a = G.arcFromBulge(G.P(10, 0), G.P(0, 10), G.bulgeOf(90));
+chk('arc90 center=origin', a && near(a.cx, 0, 1e-9) && near(a.cy, 0, 1e-9) && near(a.r, 10, 1e-9), a ? [a.cx, a.cy, a.r] : 'null');
+chk('arc90 ccw', a && a.ccw === true);
+var a2 = G.arcFromBulge(G.P(10, 0), G.P(0, 10), G.bulgeOf(-90));
+chk('arc-90 center', a2 && near(a2.cx, 10, 1e-9) && near(a2.cy, 10, 1e-9), a2 ? [a2.cx, a2.cy, a2.r] : 'null');
+var a3 = G.arcFromBulge(G.P(10, 0), G.P(0, 10), G.bulgeOf(270));
+chk('arc270 center', a3 && near(a3.cx, 10, 1e-9) && near(a3.cy, 10, 1e-9) && near(a3.r, 10, 1e-9), a3 ? [a3.cx, a3.cy, a3.r] : 'null');
+chk('arc270 sweep', a3 && near(a3.sweep * G.R2D, 270, 1e-9), a3 ? a3.sweep * G.R2D : 'null');
+
+// 5. reverse
+var rv = G.reverse(rr);
+chk('reverse area sign', near(G.loopArea(rv), -G.loopArea(rr), 1), G.loopArea(rv));
+var rvb = G.loopBBox(rv);
+chk('reverse bbox same', near(rvb.w, rb.w, 1e-6) && near(rvb.h, rb.h, 1e-6), [rvb.w, rvb.h]);
+chk('reverse twice', near(G.loopArea(G.reverse(rv)), G.loopArea(rr), 1));
+
+// 6. xform
+var t1 = G.xform(rr, { rot: 37, tx: 5, ty: -8 });
+chk('rot keeps area', near(G.loopArea(t1), G.loopArea(rr), 1), G.loopArea(t1));
+var m1 = G.xform(rr, { mx: true });
+chk('mirror keeps CCW area', near(G.loopArea(m1), G.loopArea(rr), 1), G.loopArea(m1));
+var mb = G.loopBBox(m1);
+chk('mirror bbox flipped', near(mb.x0, -100, 0.02) && near(mb.x1, 0, 0.02), [mb.x0, mb.x1]);
+
+// 7. splitArcs
+var sc = G.splitArcs(c, 90);
+chk('splitArcs circle 4pts', sc.length === 4, sc.length);
+chk('splitArcs area', near(G.loopArea(sc), G.loopArea(c), 1e-9), G.loopArea(sc));
+chk('splitArcs roundRect', near(G.loopArea(G.splitArcs(rr, 90)), G.loopArea(rr), 1));
+
+// 8. offsetLoop
+var ob = G.loopBBox(G.offsetLoop(r, 3));
+chk('offset rect +3', near(ob.w, 106, 1e-6) && near(ob.h, 56, 1e-6), [ob.w, ob.h]);
+var ocb = G.loopBBox(G.offsetLoop(c, 2));
+chk('offset circle +2 -> d44', near(ocb.w, 44, 0.05), ocb.w);
+chk('offset circle -5 -> d30', near(G.loopBBox(G.offsetLoop(c, -5)).w, 30, 0.05), G.loopBBox(G.offsetLoop(c, -5)).w);
+chk('offset roundRect +2.5', near(G.loopBBox(G.offsetLoop(rr, 2.5)).w, 105, 0.05), G.loopBBox(G.offsetLoop(rr, 2.5)).w);
+var hole = G.ensureOrient(G.rect(0, 0, 20, 20), false);
+chk('hole CW', G.loopArea(hole) < 0, G.loopArea(hole));
+chk('hole offset shrinks', near(G.loopBBox(G.offsetLoop(hole, 1)).w, 18, 1e-6), G.loopBBox(G.offsetLoop(hole, 1)).w);
+
+// 9. frame 外法线
+var f = G.frame(G.P(0, 0), G.P(100, 0));
+chk('frame bottom outward -y', near(f.ey.x, 0, 1e-12) && near(f.ey.y, -1, 1e-12), [f.ey.x, f.ey.y]);
+var p = f.at(50, 5);
+chk('frame at(50,5)', near(p.x, 50, 1e-12) && near(p.y, -5, 1e-12), [p.x, p.y]);
+var f2 = G.frame(G.P(100, 60), G.P(0, 60));
+chk('frame top outward +y', near(f2.ey.y, 1, 1e-12), f2.ey.y);
+
+// 10. 多边形关系
+chk('pointInPoly in', G.pointInPoly({ x: 50, y: 25 }, G.flatten(r)));
+chk('pointInPoly out', !G.pointInPoly({ x: 150, y: 25 }, G.flatten(r)));
+chk('overlap yes', G.polysOverlap(G.flatten(G.rect(0, 0, 10, 10)), G.flatten(G.rect(5, 5, 10, 10))));
+chk('overlap no', !G.polysOverlap(G.flatten(G.rect(0, 0, 10, 10)), G.flatten(G.rect(20, 20, 10, 10))));
+chk('contained overlap', G.polysOverlap(G.flatten(G.rect(0, 0, 100, 100)), G.flatten(G.rect(10, 10, 5, 5))));
+chk('no self-intersect', !G.selfIntersects(G.flatten(rr)));
+
+// 11. replaceEdge
+var box = G.rect(0, 0, 100, 50);
+var notched = G.replaceEdge(box, 0, [{ u: 40, v: 0 }, { u: 40, v: -10 }, { u: 60, v: -10 }, { u: 60, v: 0 }]);
+chk('replaceEdge 8 pts', notched.length === 8, notched.length);
+chk('notch area -200', near(G.loopArea(notched), 4800, 0.01), G.loopArea(notched));
+chk('notch no self-hit', !G.selfIntersects(G.flatten(notched)));
+var tabbed = G.replaceEdge(box, 0, [{ u: 40, v: 0 }, { u: 40, v: 10 }, { u: 60, v: 10 }, { u: 60, v: 0 }]);
+chk('tab area +200', near(G.loopArea(tabbed), 5200, 0.01), G.loopArea(tabbed));
+chk('tab below y0', near(G.loopBBox(tabbed).y0, -10, 1e-9), G.loopBBox(tabbed).y0);
+} catch (e) { log('FAIL exception ' + e.message + ' @ ' + e.stack); }
+var fails = L.filter(function (s) { return s.indexOf('FAIL') === 0; }).length;
+document.getElementById('out').textContent = L.join('\n') + '\n---\nTOTAL ' + L.length + '  FAILS ' + fails;
+</script>
