@@ -1,0 +1,74 @@
+# 把仓库发成 GitHub Pages 站点。
+#
+# 为什么用 workflow 而不是去 Settings 里点“Deploy from a branch”:
+#   actions/configure-pages 的 enablement: true 能用 workflow 自带的 GITHUB_TOKEN
+#   直接开启 Pages —— 于是不需要任何 Personal Access Token。
+#   少一个需要保密的东西, 就少一个泄露面。
+#
+# 纯静态直传: 没有 npm install、没有构建步骤。
+# 根 index.html 会把访客重定向到 app/index.html。
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 不给 contents: write —— 建站不需要改仓库。最小权限原则。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只跑一个部署; 不取消进行中的(避免把刚上线的版本抦成半成品)
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置并开启 Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: 打包整个仓库(纯静态)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: 部署
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 验证站点真的能打开
+        env:
+          URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          echo "站点: $URL"
+          # Pages 首次上线有传播延迟, 轮询而不是睡固定秒数
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /tmp/root.html -w '%{http_code}' -L "$URL")
+            if [ "$code" = "200" ] && grep -q 'app/index.html' /tmp/root.html; then
+              echo "✓ 根页可访问且含重定向 (第 $i 次)"
+              ok=1; break
+            fi
+            echo "第 $i 次: HTTP $code, 等 10s"
+            sleep 10
+          done
+          [ "$ok" = "1" ] || { echo "✕ 站点未能打开"; exit 1; }
+          # 主应用与一个 js 资源也得真的拉得到, 否则等于白页
+          for sub in app/index.html app/js/joints.js app/tests/index.html; do
+            code=$(curl -s -o /tmp/x -w '%{http_code}' -L "${URL%/}/$sub")
+            size=$(wc -c < /tmp/x)
+            echo "  $sub -> HTTP $code, $size 字节"
+            [ "$code" = "200" ] && [ "$size" -gt 1000 ] || { echo "  ✕ $sub 异常"; exit 1; }
+          done
+          echo "✓ 站点验收通过: $URL"

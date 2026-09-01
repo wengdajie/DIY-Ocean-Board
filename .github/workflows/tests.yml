@@ -1,19 +1,22 @@
-# 把"双击跑测试"变成 CI。
+# 把“双击跑测试”变成 CI。
 #
 # 为什么能跑: 测试本身就是一批 HTML 页面, 里面把结果写进 <pre id="out">。
 # 所以 CI 只需 headless Chrome + 一个把 DOM 里的汇总提出来的脚本。
 # 没有 Node、没有 npm install、没有构建步骤 —— 与本地完全一致。
 #
 # 两个坐标要求:
-#   1. 测试页用 <iframe src="../index.html"> 加载主应用, file:// 下跳不过去除非开
-#      --allow-file-access-from-files; 但 CI 里索性起一个静态 http 服务器更接近真实部署。
-#   2. 全套件约 40 秒, 必须给足 --virtual-time-budget, 否则会拿到"未取到结果"。
+#   1. 测试页用 <iframe src="../index.html"> 加载主应用。file:// 下要开
+#      --allow-file-access-from-files; CI 里索性起一个静态 http 服务器, 更接近真实部署。
+#   2. 全套件约 40 秒, 必须给足 --virtual-time-budget, 否则会拿到“未取到结果”。
 name: tests
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   browser-tests:
@@ -26,19 +29,25 @@ jobs:
         with:
           chrome-version: stable
 
-      - name: 起静态服务器
-        run: |
-          python3 -m http.server 8123 --bind 127.0.0.1 &
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8123/index.html > /dev/null && break
-            sleep 1
-          done
-
-      - name: 跑测试总控 (11 套件)
+      # 服务器与测试合在同一步: 后台进程跳步存活虽然一般没问题,
+      # 但若不把 stdout 重定向, runner 会等管道 EOF 而把那一步挂死。
+      # 干脆同步启动 + trap 收尾, 不给意外留缝。
+      - name: 跑测试总控 (11 套件, 1845 断言)
         env:
           CHROME: ${{ steps.chrome.outputs.chrome-path }}
           BASE: http://127.0.0.1:8123
-        run: python3 tools/ci_run_tests.py
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8123 --bind 127.0.0.1 > /tmp/http.log 2>&1 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8123/index.html -o /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8123/index.html -o /dev/null \
+            || { echo '静态服务器没起来'; cat /tmp/http.log; exit 1; }
+          python3 tools/ci_run_tests.py
 
-      - name: 外部交叉校验 (DXF/SVG/CSV, 纯 Python 重算)
+      - name: 外部交叉校验 (DXF/SVG/CSV, 纯 Python 重算 2484 项)
         run: python3 tools/verify_exports.py
