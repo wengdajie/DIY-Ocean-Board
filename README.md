@@ -515,6 +515,7 @@ tools/
   dump.json           上一次导出的样本快照（18 组场景）
   ci_run_tests.py     CI 里跑总控页并卡硬指标（套件数 / 每套断言数 / 启动自检）
   publish.py          发布到 GitHub + 开 Pages（令牌走 stdin，不落盘）
+  ci_status.py        查 CI 结果与失败原因（走公开的 annotations 接口，免令牌）
 
 index.html            仓库根重定向 → app/index.html（GitHub Pages 入口）
 .nojekyll             告诉 Pages 不跑 Jekyll，否则 `_` 开头的目录会被吞
@@ -904,3 +905,18 @@ TOTAL 行，"页面里没有 FAIL 字样"于是会被误当成通过。所以
 
 这三条做过变异验证：把 `test-visual` 基线从 147 改成 200（模拟断言变少），
 脚本当场 `rc=1` 并同时报出"断言数 147 < 基线 200"与"总断言数不足"两条。
+
+### 怎么查 CI 为什么红了
+
+```powershell
+python tools\ci_status.py          # 看最近各工作流 + 逐步骤 + 失败注释
+python tools\ci_status.py pages    # 只看某一个
+```
+
+不需要令牌。原理：`GET /actions/runs/<id>/logs` 匿名访问返 **403**，
+但 **check-runs 的 annotations 接口是公开可读的**。所以 `ci_run_tests.py`
+把套件数字、Chrome 版本、失败原因全发成 `::notice::` / `::error::`，
+并在有套件红时**自动重跑那一个套件、把 `FAIL` 行逐条发出来**。
+
+> 匿名限额只有 **60 次/小时**，轮询几轮就没了。脚本会先报限额并告诉你
+> 何时恢复；设 `GH_TOKEN` 可提到 5000/小时。国内直连不通时设 `HTTPS_PROXY`。
