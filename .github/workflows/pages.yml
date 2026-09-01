@@ -34,10 +34,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 配置并开启 Pages
+      # 前置(只需做一次): 仓库 Settings → Pages → Source 选 "GitHub Actions"。
+      # 为什么不用 enablement: true 自动开: 那需要把仓库的 GITHUB_TOKEN
+      # 提成可写权限, 为了省一次点击而扩大 CI 权限不值得。
+      - name: 配置 Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: 打包整个仓库(纯静态)
         uses: actions/upload-pages-artifact@v3

@@ -112,6 +112,30 @@ def main():
         print('%-22s pass=%-5s fail=%-4s %s' % (name, npass, nfail, flag))
         ann('notice', '%s pass=%s fail=%s %s' % (name, npass, nfail, flag))
 
+    # 哪条断言红了: 单独重跑失败套件, 把 FAIL 行提出来
+    for cells in rows:
+        if cells[3] != '0':
+            name = cells[0]
+            ann('error', '--- 重跑 %s 取失败详情 ---' % name)
+            d2 = run('%s/app/tests/%s' % (BASE, name), 180000)
+            mo = re.search(r'(?s)<pre id="out"[^>]*>(.*?)</pre>', d2)
+            if not mo:
+                ann('error', '%s: 拿不到 <pre id="out">' % name)
+                continue
+            txt = re.sub(r'<[^>]+>', '', mo.group(1))
+            txt = (txt.replace('&lt;', '<').replace('&gt;', '>')
+                      .replace('&quot;', '"').replace('&#39;', "'")
+                      .replace('&amp;', '&'))
+            hit = 0
+            for ln in txt.split('\n'):
+                if 'FAIL' in ln and 'FAILS' not in ln:
+                    ann('error', '%s %s' % (name, ln.strip()[:300]))
+                    hit += 1
+                    if hit >= 12:
+                        break
+            if not hit:
+                ann('error', '%s: 重跑时没看到 FAIL 行\uff08不稳定用例?\uff09' % name)
+
     missing = set(BASELINE) - seen
     if missing:
         bad.append('\u7f3a\u5957\u4ef6: %s' % ', '.join(sorted(missing)))
