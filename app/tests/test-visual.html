@@ -555,19 +555,47 @@ window.onload = function () {
         return o0 < o1 && o1 < o2 && o2 < o3;
       })());
       chk('\u4e09\u89c6\u56fe: \u591a\u9009\u65f6\u4e0d\u6807\u677f\u540d(\u5426\u5219\u7cca\u6210\u4e00\u56e2)', (function () {
-        /* \u5355\u9009\u65f6\u4f1a\u5728\u77e9\u5f62\u4e0a\u65b9\u5199\u540d\u5b57 -> \u6a59\u8272\u6df1\u8272\u6587\u5b57\u50cf\u7d20;
-         * \u591a\u9009\u65f6\u4e0d\u5199 -> \u6df1\u6a59(\u6587\u5b57\u8272 #a5620c)\u50cf\u7d20\u5e94\u660e\u663e\u53d8\u5c11\u3002 */
-        function inkOf(selArg) {
-          w.Render.drawPlan(plc, pnl, { thickness: 15, selected: selArg });
-          var dd = plg.getImageData(0, 0, plc.width, plc.height).data, n = 0;
-          for (var i = 0; i < dd.length; i += 4) {
-            if (dd[i + 3] > 200 && dd[i] > 130 && dd[i] < 200 && dd[i + 1] < 130 && dd[i + 2] < 60) n++;
+        /* \u5355\u9009\u624d\u5199\u540d\u5b57, \u591a\u9009\u4e0d\u5199\u3002
+         *
+         * \u4e3a\u4f55\u4e0d\u76f4\u63a5\u6570\u201c\u6df1\u6a59\u8272\u6587\u5b57\u50cf\u7d20\u201d: \u90a3\u7b49\u4e8e\u628a\u65ad\u8a00\u6302\u5728
+         * \u201c\u5f53\u524d\u7cfb\u7edf\u88c5\u4e86\u80fd\u6e32\u67d3\u4e2d\u6587\u7684\u5b57\u4f53\u201d\u4e0a\u3002Linux headless \u5e38\u89c1\u65e0 CJK \u5b57\u4f53,
+         * \u677f\u540d\u753b\u51fa\u6765\u662f\u7a7a\u767d -> one \u4e0e two \u540c\u4e3a 0 -> two < one \u4e3a\u5047\u3002
+         * \u8fd9\u6b63\u662f\u672c\u5957\u4ef6\u5728 CI(Linux) \u4e0a\u552f\u4e00\u7ea2\u6389\u7684\u4e00\u6761\u3002
+         *
+         * \u6539\u6210\u7528 fillText \u63d2\u9488\u76f4\u63a5\u91cf\u201c\u5230\u5e95\u8c03\u4e86\u51e0\u6b21\u3001\u5199\u7684\u662f\u4ec0\u4e48\u201d \u2014\u2014
+         * \u8fd9\u624d\u662f\u771f\u6b63\u8981\u65ad\u8a00\u7684\u884c\u4e3a, \u4e14\u4e0e\u5b57\u4f53\u3001\u62d7\u952e\u9f7f\u3001DPR \u5168\u65e0\u5173\u3002 */
+        function namesDrawn(selArg) {
+          var names = pnl.map(function (P) { return P.name; });
+          var orig = plg.fillText, got = [];
+          plg.fillText = function (t) {
+            if (names.indexOf(String(t)) >= 0) got.push(String(t));
+            return orig.apply(this, arguments);
+          };
+          try {
+            w.Render.drawPlan(plc, pnl, { thickness: 15, selected: selArg });
+          } finally {
+            plg.fillText = orig;
           }
-          return n;
+          return got;
         }
-        var one = inkOf([pnl[0].id]);
-        var two = inkOf([pnl[0].id, pnl[1].id]);
-        return two < one;
+        var n0 = namesDrawn([]);
+        var n1 = namesDrawn([pnl[0].id]);
+        var n2 = namesDrawn([pnl[0].id, pnl[1].id]);
+        var n3 = namesDrawn([pnl[0].id, pnl[1].id, pnl[2].id]);
+        chk('\u4e09\u89c6\u56fe: \u672a\u9009\u65f6\u4e00\u4e2a\u677f\u540d\u4e5f\u4e0d\u5199', n0.length === 0, n0.join(','));
+        /* \u4e09\u4e2a\u89c6\u56fe\u683c\u5404\u81ea\u6807\u4e00\u6b21 -> \u5e94\u547d\u4e2d nv \u6b21, \u4e0d\u662f 1 \u6b21\u3002
+         * \u8fd9\u4e2a\u6570\u5b57\u662f\u63d2\u9488\u62d3\u51fa\u6765\u7684 \u2014\u2014 \u539f\u5148\u6309"\u53ea\u5199 1 \u6b21"\u5199\u7684\u65ad\u8a00\u5f53\u573a\u7ea2\u4e86\u3002 */
+        var nv = plr.views.length;
+        chk('\u4e09\u89c6\u56fe: \u5355\u9009\u65f6\u6bcf\u4e2a\u89c6\u56fe\u5404\u6807\u4e00\u6b21\u9009\u4e2d\u677f\u7684\u540d\u5b57',
+          n1.length === nv && n1.every(function (t) { return t === pnl[0].name; }),
+          n1.join(',') + ' \uff08\u671f\u671b ' + nv + ' \u4e2a ' + pnl[0].name + '\uff09');
+        chk('\u4e09\u89c6\u56fe: \u53cc\u9009/\u4e09\u9009\u90fd\u4e0d\u5199\u540d\u5b57',
+          n2.length === 0 && n3.length === 0, 'two=' + n2.join(',') + ' three=' + n3.join(','));
+        /* \u63d2\u9488\u672c\u8eab\u5f97\u662f\u6709\u6548\u7684: \u5355\u9009\u786e\u5b9e\u6355\u5230\u4e86 nv \u6b21\u3002
+         * \u82e5\u63d2\u9488\u201c\u6c38\u8fdc\u6355\u4e0d\u5230\u201d, n0/n2/n3 \u5168\u4e3a 0 \u4e5f\u4f1a\u8ba9\u524d\u4e24\u6761\u5047\u7eff\u3002 */
+        return n0.length === 0 && n1.length === plr.views.length &&
+               n1.every(function (t) { return t === pnl[0].name; }) &&
+               n2.length === 0 && n3.length === 0;
       })());
       /* \u60ac\u505c\u9ad8\u4eae: \u6bd4\u9009\u4e2d\u6d45\u3001\u6bd4\u672a\u9009\u6df1 */
       chk('\u4e09\u89c6\u56fe: hover \u9ad8\u4eae\u4ecb\u4e8e\u672a\u9009\u4e0e\u9009\u4e2d\u4e4b\u95f4', (function () {

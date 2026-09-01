@@ -43,7 +43,7 @@ BASELINE = {
     'test-image.html': 87,
     'test-custom.html': 499,
     'test-e2e.html': 490,
-    'test-visual.html': 147,
+    'test-visual.html': 150,
 }
 TOTAL_MIN = sum(BASELINE.values())
 
