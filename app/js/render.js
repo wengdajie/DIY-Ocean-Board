@@ -764,12 +764,19 @@
     var pad = 30, lab = 20, gap = 14;
     var cols = c.w >= 640 ? 3 : 1;
     var rows = Math.ceil(3 / cols);
-    var cw = (c.w - gap * (cols + 1)) / cols;
+    /* 正视图是主要定位视图，给它更大的阅读面积；俯/侧视图保留
+     * 足够的辅助空间。单列布局仍按 1:1，不改变小屏交互。 */
+    var usable = c.w - gap * (cols + 1);
+    var weights = cols === 3 ? [1.8, 0.9, 0.9] : [1];
+    var totalWeight = weights.reduce(function (a, b) { return a + b; }, 0);
+    var widths = weights.map(function (w) { return usable * w / totalWeight; });
     var chh = (c.h - gap * (rows + 1)) / rows;
     var out = [];
     var guides = opts.guides || [];
     VIEWS.forEach(function (V, vi) {
-      var gx = gap + (vi % cols) * (cw + gap);
+      var gx = gap;
+      for (var gi = 0; gi < vi % cols; gi++) gx += widths[gi] + gap;
+      var cw = widths[vi % cols];
       var gy = gap + Math.floor(vi / cols) * (chh + gap);
       var W = Math.max(1, ext[V.h][1] - ext[V.h][0]);
       var H = Math.max(1, ext[V.v][1] - ext[V.v][0]);

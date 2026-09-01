@@ -143,9 +143,9 @@
     <!-- ---------- 通用 ---------- -->
     <div id="dimSec">
       <h2>整体尺寸（外形）</h2>
-      <div class="row"><label>宽 W</label><input type="number" id="width" value="600" step="10" min="80"><span class="unit">mm</span></div>
-      <div class="row"><label>深 D</label><input type="number" id="depth" value="320" step="10" min="60"><span class="unit">mm</span></div>
-      <div class="row"><label>高 H</label><input type="number" id="height" value="720" step="10" min="80"><span class="unit">mm</span></div>
+      <div class="row"><label title="榫卯完成后的成品外形宽度">成品宽 W</label><input type="number" id="width" value="600" step="10" min="80"><span class="unit">mm</span></div>
+      <div class="row"><label title="榫卯完成后的成品外形深度">成品深 D</label><input type="number" id="depth" value="320" step="10" min="60"><span class="unit">mm</span></div>
+      <div class="row"><label title="榫卯完成后的成品外形高度">成品高 H</label><input type="number" id="height" value="720" step="10" min="80"><span class="unit">mm</span></div>
     </div>
 
     <h2>板材</h2>
@@ -212,7 +212,7 @@
     <div class="row jsx" id="dcRow" style="display:none"><label>每处个数</label><input type="number" id="dowelCount" value="0" step="1" min="0"></div>
     <div class="row jsx" id="bwRow" style="display:none"><label>饼干槽宽</label><input type="number" id="biscuitWide" value="0" step="0.5" min="0"><span class="unit">mm</span></div>
     <div class="row jsx" id="blRow" style="display:none"><label>饼干槽长</label><input type="number" id="biscuitLen" value="0" step="1" min="0"><span class="unit">mm</span></div>
-    <p class="hint jsx" id="jsxHint" style="display:none">这组样式专属尺寸全部支持 <b>0 = 自动</b>（按板厚按比例算）。它们只改接合部位，不会改变你填的外形尺寸。</p>
+    <p class="hint jsx" id="jsxHint" style="display:none">专属尺寸支持 <b>0 = 自动</b>；成品宽/深/高是标准外形尺寸，榫卯在接合处处理。楔钉/卡扣的锁紧头会按选项另行提示穿出量。</p>
     <div class="row" id="fwRow"><label>榫齿宽（目标）</label><input type="number" id="fingerW" value="0" step="5" min="0"><span class="unit">mm</span></div>
     <p class="hint" id="fwHint">0 = 自动（约 2.2 倍板厚，齿数强制为奇数以保证左右对称）</p>
     <div class="row" id="tcRow" style="display:none"><label>每处榫齿数</label><input type="number" id="tenonCount" value="3" step="2" min="1" max="15"></div>

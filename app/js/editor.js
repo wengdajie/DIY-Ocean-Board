@@ -102,8 +102,14 @@
       return;
     }
     var id = r.panel.id;
+    var jumpField = r.view && r.view.key === 'front' ? 'x' :
+      (r.view && r.view.key === 'top' ? 'y' : 'z');
     if (!isSel(id) || additive) setSel(id, additive);
-    if (!draggable()) { render(); drawPlan(); return; }
+    if (!draggable()) {
+      render(); drawPlan();
+      jumpToPanel(id, jumpField);
+      return;
+    }
     var t = ctx.thickness();
     var C = global.Custom;
     var ids = selIds();
@@ -119,6 +125,7 @@
     };
     lastSnaps = [];
     render(); drawPlan();
+    jumpToPanel(id, jumpField);
     ev.preventDefault();
   }
 
@@ -707,6 +714,7 @@
     list.forEach(function (p, i) {
       var on = readOnly ? (st.sel === p.id) : isSel(p.id);
       var tr = el('tr', on ? 'sel' : '');
+      tr.dataset.panelId = p.id;
       var box = C.panelBox(p, t) || { x: 0, y: 0, z: 0, w: 0, d: 0, h: 0 };
       /* 存盘后 Ctrl/Shift 点圆点 = 多选(和三视图一致) */
       var pick = btn(on ? '●' : '○', '', function (ev) {
@@ -724,6 +732,7 @@
         tr.appendChild(td(ORIENT_SHORT[p.plane] || p.plane));
         ['x', 'y', 'z', 'w', 'd', 'h'].forEach(function (k, ki) {
           var c = td(String(G.round(box[k], 1)), ki === 0 || ki === 3 ? 'sepL' : '');
+          c.dataset.field = k;
           if (C.isThickField(k, p.plane)) c.className += ' thick';
           tr.appendChild(c);
         });
@@ -750,7 +759,9 @@
             e.disabled = true;
             e.title = '这个方向就是板厚方向，由板厚决定，改朝向才会变';
           }
-          tr.appendChild(td(e, ki === 0 || ki === 3 ? 'sepL' : ''));
+          var c2 = td(e, ki === 0 || ki === 3 ? 'sepL' : '');
+          c2.dataset.field = k;
+          tr.appendChild(c2);
         });
         tr.appendChild(td(inp('number', p.qty || 1, function (v) {
           p.qty = Math.max(1, Math.round(num(v, 1))); ctx.changed();
@@ -786,13 +797,33 @@
     });
     tbl.appendChild(tb);
     host.innerHTML = '';
-    /* 表格上方补一条"怎么读这张表"的说明, 免得又要猜 */
+    /* 只保留一行字段图例；操作提示放到控件 title，避免占用编辑空间。 */
     var lead = el('div', 'gridLead');
-    lead.innerHTML = '每一行 = 一块板。<b>位置</b>填板的最小角（左/前/下）在柜体里的坐标，' +
-      '<b>尺寸</b>填三个方向的长度 —— 其中灰掉的那个就是板厚方向，由板厚自动决定。' +
-      '下方三视图里可以<b>直接拖动</b>板位（自动吸附），拖完这里的数字跟着变。';
+    lead.innerHTML = '<b>位置</b> 左起 X · 前起 Y · 离地 Z　 <b>尺寸</b> 宽 W · 深 D · 高 H　' +
+      '<span>灰色尺寸=板厚</span>';
     host.appendChild(lead);
     host.appendChild(tbl);
+  }
+
+  /* 三视图选板后把对应行和字段带到视线内，尤其是正视图的 X/W 列。
+   * 不依赖 CSS.escape：用户导入的 panel id 也可能含特殊字符。 */
+  function jumpToPanel(id, field) {
+    if (!host) return;
+    var rows = host.querySelectorAll('tr[data-panel-id]'), row = null;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.panelId === String(id)) { row = rows[i]; break; }
+    }
+    if (!row) return;
+    var cell = row.querySelector('[data-field="' + field + '"]') || row;
+    var raf = global.requestAnimationFrame || function (fn) { return global.setTimeout(fn, 0); };
+    raf(function () {
+      row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      cell.scrollIntoView({ block: 'nearest', inline: 'center' });
+      var input = cell.querySelector('input, select');
+      if (input && input.focus) input.focus({ preventScroll: true });
+      cell.classList.add('jumpFlash');
+      global.setTimeout(function () { cell.classList.remove('jumpFlash'); }, 700);
+    });
   }
 
   /* ============================================================
@@ -924,17 +955,16 @@
     var hud = $('planHud');
     if (!r) { hud.textContent = ''; return; }
     if (st.cmode !== 'panels') {
-      hud.textContent = '配方预览为只读：点「转为板位表继续改 →」后即可拖拽调整';
+      hud.textContent = '只读预览 · 转为板位表后可拖动';
       return;
     }
     if (drag && lastSnaps.length) {
       hud.innerHTML = '<b>已吸附</b>　' + lastSnaps.map(function (s) { return s.label; }).join(' ／ ');
     } else if (drag) {
-      hud.textContent = '拖动中…（松手落位，按住 Alt 可临时关闭吸附）';
+      hud.textContent = '拖动中… · 松手落位 · Alt 关闭吸附';
     } else {
       var n = selIds().length;
-      hud.innerHTML = '在任一视图里<b>直接拖动矩形</b>即可移动该板，会自动吸附到其它板的边/中线（Alt 关闭吸附）。' +
-        'Ctrl/Shift 点选可多选' + (n > 1 ? '（当前 ' + n + ' 块，一起拖动）' : '') + '，再用上方对齐按钮。';
+      hud.innerHTML = '<b>拖动</b>移动 · 自动吸附' + (n > 1 ? ' · 已选 ' + n + ' 块' : '') + ' · Ctrl/Shift 多选';
     }
   }
 
@@ -963,6 +993,7 @@
     expanded: expanded,
     selIds: selIds, setSel: setSel, isSel: isSel,
     doAlign: doAlign, doDistribute: doDistribute,
+    jumpToPanel: jumpToPanel,
     /* 测试钩子: 用世界坐标模拟一次拖拽, 免得测试要自己算 canvas 像素 */
     __drag: function () { return drag; },
     __snaps: function () { return lastSnaps.slice(); }
