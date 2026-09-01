@@ -1,5 +1,10 @@
 # 海洋板 DIY · 榫卯 CAD 图纸生成器
 
+[![tests](https://github.com/wengdajie/DIY-Ocean-Board/actions/workflows/tests.yml/badge.svg)](https://github.com/wengdajie/DIY-Ocean-Board/actions/workflows/tests.yml)
+[![pages](https://github.com/wengdajie/DIY-Ocean-Board/actions/workflows/pages.yml/badge.svg)](https://github.com/wengdajie/DIY-Ocean-Board/actions/workflows/pages.yml)
+
+**在线使用**：https://wengdajie.github.io/DIY-Ocean-Board/
+
 一个**纯前端、离线可用**的参数化家具 CAD 生成器。三种用法：
 
 1. **选结构配方填尺寸** —— **16 种**配方（家具 / 柜架 / 置物架 / 酒格四大类），榫卯全自动
@@ -813,10 +818,27 @@ DXF 解析、带 bulge 的精确面积、含圆弧极值点的包围盒、RFC418
 
 纯静态、无构建、无依赖 —— 把仓库丢上去开个 Pages 就能用。
 
-### 一行命令
+本仓库已部署到：https://wengdajie.github.io/DIY-Ocean-Board/
+
+### ❗ 首次建站需要你手动点一下（只需一次）
+
+仓库 **Settings → Pages → Source** 选成 **`GitHub Actions`**（不是 "Deploy from a branch"）。
+
+为何不能全自动：试过用 `actions/configure-pages` 的 `enablement: true` 自动开，
+CI 报 **`Resource not accessible by integration`** —— 默认仓库的 `GITHUB_TOKEN`
+是只读的，无权创建 Pages 站点。要么把 CI 令牌提成可写（扩大权限面），
+要么你点一下下拉框。选了后者。
+
+设完后回 Actions 里重跑 `pages` 工作流（或随便推一个 commit），1–2 分钟就能访问。
+
+### 后续更新
+
+直接 `git push` 即可 —— `pages` 工作流会自动重新发布并**轮询验收站点**。
+
+### 换个仓库发布
 
 ```powershell
-python tools\publish.py marine-ply-diy
+python tools\publish.py 你的仓库名
 # 然后粘上令牌、回车
 ```
 
