@@ -15,6 +15,18 @@ import io, os, re, subprocess, sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+IN_CI = bool(os.environ.get('GITHUB_ACTIONS'))
+
+
+def ann(level, msg):
+    """发一条 GitHub Actions 注释(匿名可读), 本地跑时退化成普通打印。"""
+    one = ' | '.join(str(msg).split('\n'))
+    if IN_CI:
+        print('::%s::%s' % (level, one), flush=True)
+    else:
+        print('[%s] %s' % (level, one), flush=True)
+
+
 CHROME = os.environ.get('CHROME') or 'google-chrome'
 BASE = os.environ.get('BASE') or 'http://127.0.0.1:8123'
 
@@ -45,12 +57,25 @@ def run(url, budget=300000):
     return p.stdout.decode('utf-8', 'replace')
 
 
+def chrome_info():
+    try:
+        p = subprocess.run([CHROME, '--version'], capture_output=True, timeout=60)
+        v = (p.stdout.decode('utf-8', 'replace') or
+             p.stderr.decode('utf-8', 'replace')).strip()
+    except Exception as e:
+        v = '(\u62ff\u4e0d\u5230\u7248\u672c: %s)' % e
+    ann('notice', 'CHROME=%s | %s | BASE=%s' % (CHROME, v, BASE))
+
+
 def main():
+    chrome_info()
     dom = run(BASE + '/app/tests/index.html')
     # \u603b\u63a7\u9875\u628a\u6bcf\u4e2a\u5957\u4ef6\u7684 pass/fail \u5199\u5728 <tbody id="tb"> \u7684\u5355\u5143\u683c\u91cc
     m = re.search(r'(?s)<tbody id="tb">(.*?)</tbody>', dom)
     if not m:
-        print('\u6ca1\u627e\u5230\u6d4b\u8bd5\u8868\u683c \u2014\u2014 \u603b\u63a7\u9875\u672c\u8eab\u6ca1\u8dd1\u8d77\u6765')
+        ann('error', '\u6ca1\u627e\u5230\u6d4b\u8bd5\u8868\u683c \u2014\u2014 \u603b\u63a7\u9875\u672c\u8eab\u6ca1\u8dd1\u8d77\u6765'
+                     '\uff08DOM \u957f\u5ea6 %d\uff09' % len(dom))
+        ann('error', 'DOM \u5f00\u5934: %s' % dom[:600])
         io.open('ci-dom.html', 'w', encoding='utf-8').write(dom)
         return 2
 
@@ -85,6 +110,7 @@ def main():
             flag = '\u65ad\u8a00\u53d8\u5c11'
             bad.append('%s: \u65ad\u8a00\u6570 %d < \u57fa\u7ebf %d\uff08\u4e2d\u9014\u629b\u5f02\u5e38\u4e86?\uff09' % (name, npass, base))
         print('%-22s pass=%-5s fail=%-4s %s' % (name, npass, nfail, flag))
+        ann('notice', '%s pass=%s fail=%s %s' % (name, npass, nfail, flag))
 
     missing = set(BASELINE) - seen
     if missing:
@@ -93,7 +119,10 @@ def main():
         bad.append('\u603b\u65ad\u8a00\u6570 %d < \u57fa\u7ebf %d' % (total, TOTAL_MIN))
 
     print('-' * 60)
-    print('\u5957\u4ef6 %d/%d\uff0c\u603b\u65ad\u8a00 %d\uff08\u57fa\u7ebf %d\uff09' % (len(seen), len(BASELINE), total, TOTAL_MIN))
+    summary = '\u5957\u4ef6 %d/%d\uff0c\u603b\u65ad\u8a00 %d\uff08\u57fa\u7ebf %d\uff09' % (
+        len(seen), len(BASELINE), total, TOTAL_MIN)
+    print(summary)
+    ann('notice', summary)
 
     # \u542f\u52a8\u81ea\u68c0\u5355\u72ec\u518d\u770b\u4e00\u773c: \u5b83\u5728\u4e3b\u9875\u53f3\u4e0a\u89d2\u5f90\u6807\u91cc, \u603b\u63a7\u8868\u683c\u91cc\u770b\u4e0d\u5230
     home = run(BASE + '/app/index.html', 60000)
@@ -114,6 +143,7 @@ def main():
         print('-' * 60)
         for b in bad:
             print('\u2715 ' + b)
+            ann('error', b)
         return 1
     print('\u2713 \u5168\u90e8\u901a\u8fc7')
     return 0
