@@ -225,6 +225,7 @@ var grOff = Nest.nest(grItems, so({ respectGrain: false }));
 chk('关掉纹理约束紧凑度不降', grOff.stats.packDensity >= grR.stats.packDensity - 1e-9,
   grOff.stats.packDensity.toFixed(4) + ' vs ' + grR.stats.packDensity.toFixed(4));
 chk('关掉纹理约束后不再上报锁定', grOff.stats.grainLocked === 0, grOff.stats.grainLocked);
+chk('未显式设置时默认允许 90° 旋转', Nest.nest(grItems, so()).stats.grainLocked === 0);
 /* 竖幅面: 纹理的允许角度必须翻过来 */
 var vGr = Nest.nest(items([['横纹件', 600, 300, 2, 'long']]), { w: 1220, h: 2440, margin: 10, gap: 6, respectGrain: true });
 chk('竖幅面 long 件应转 90°', vGr.sheets[0].placements.every(function (p) { return p.rot === 90; }),

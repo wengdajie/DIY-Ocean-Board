@@ -32,7 +32,7 @@ jobs:
       # 服务器与测试合在同一步: 后台进程跳步存活虽然一般没问题,
       # 但若不把 stdout 重定向, runner 会等管道 EOF 而把那一步挂死。
       # 干脆同步启动 + trap 收尾, 不给意外留缝。
-      - name: 跑测试总控 (11 套件, 1848 断言)
+      - name: 跑测试总控 (11 套件, 1852 断言)
         env:
           CHROME: ${{ steps.chrome.outputs.chrome-path }}
           BASE: http://127.0.0.1:8123

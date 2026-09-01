@@ -180,12 +180,11 @@
         <option value="maxside/shelf">货架式（最规整）</option>
       </select>
     </div>
-    <p class="hint" id="nestHint">自动比选会把 25 种排版方案（5 种下料顺序 × 5 种放置口径）全跑一遍，按“板数最少 → 剩料越整”挑最优。
-      混尺寸零件常能直接省下一整张板；想要切得规整好数可选“货架式”。</p>
+    <p class="hint" id="nestHint">自动比选会同时尝试 0°/90° 朝向和 25 种排版方案，先取板数最少，再取剩料最完整的方案。</p>
     <div class="row"><label>实测板厚</label><input type="number" id="realThickness" value="0" step="0.1" min="0"><span class="unit">mm</span></div>
     <p class="hint">海洋板标称 15mm 常有 ±0.5mm 偏差。量一下真实厚度填进来，榫眼/槽宽会按实测值走；填 0 = 用标称值。</p>
-    <div class="row"><label>遵守纹理方向</label><input type="checkbox" id="respectGrain" checked></div>
-    <p class="hint">勾上后，标了横纹/竖纹的零件排样时不会被转 90°（避免成品纹理串向）；关掉可提高板材利用率。</p>
+    <div class="row"><label>锁定纹理方向</label><input type="checkbox" id="respectGrain"></div>
+    <p class="hint">默认允许零件旋转 90°，自动寻找更高利用率；只有板面纹理必须固定时才勾选此项。</p>
 
     <h2>榫卯参数</h2>
     <div class="row" id="jsRow"><label>接合方式</label>
@@ -237,8 +236,8 @@
     <p class="hint" id="toolHint" style="display:none">3.175mm（1/8"）与 6.35mm（1/4"）是最常见的两支平底铣刀。让位量按<b>刀半径</b>算，填多少都行（0.3～25mm）。</p>
     <div class="row" id="reliefRow" style="display:none"><label>内角让位</label>
       <select id="reliefType">
-        <option value="dogbone" selected>Dogbone 过切圆（省料）</option>
-        <option value="tbone">T-bone 矩形耳（不破外形线）</option>
+        <option value="dogbone" selected>圆心在阴角（参考图小耳朵）</option>
+        <option value="tbone">T-bone 单边让位</option>
         <option value="none">不让位</option>
       </select>
     </div>

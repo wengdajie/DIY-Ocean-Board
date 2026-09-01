@@ -102,6 +102,9 @@
     var part = new Part(name, t);
     part.setOuter(outer);
     part.qty = qty;
+    /* 长/宽是用户输入的成品标准尺寸；bbox 可能因榫卯/让位变化，
+     * 单独保存标准尺寸供料单与编辑表复用。 */
+    part.meta.nominalSize = { w: w, h: h };
     var g = row.grain;
     part.meta.grain = (g === 'long' || g === 'cross') ? g : 'any';
 

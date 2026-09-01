@@ -278,6 +278,8 @@ window.onload = function () {
       // 直接改活数据 + 触发重算(等价于在表格里输入)
       var st2 = w.__app.state;
       st2.rows[st2.rows.length - 1] = { name: '测试板', len: 800, wid: 400, qty: 3, grain: 'long' };
+      d.getElementById('respectGrain').checked = true;
+      d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
       w.__app.generate();
       var tp = w.__app.state.result.parts.filter(function (p) { return p.name === '测试板'; })[0];
       chk('row edit applied', !!tp && Math.abs(tp.bbox().w - 800) < 1e-6 && Math.abs(tp.bbox().h - 400) < 1e-6,

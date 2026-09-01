@@ -455,21 +455,22 @@
     return m;
   })();
   function buildList(parts) {
-    var rows = ['<table><thead><tr><th>#</th><th>零件</th><th>数量</th><th>长(mm)</th><th>宽(mm)</th><th>厚</th>' +
+    var rows = ['<table><thead><tr><th>#</th><th>零件</th><th>数量</th><th>标准长 W(mm)</th><th>标准宽 D(mm)</th><th>下料包络(mm)</th><th>厚</th>' +
       '<th>纹理</th><th>通孔</th><th>铣槽</th><th>面积(m²)</th><th>切割(mm)</th><th>说明</th></tr></thead><tbody>'];
     var tA = 0, tC = 0, tN = 0;
     parts.forEach(function (p, i) {
       var b = p.bbox(), q = p.qty || 1;
+      var n = p.meta && p.meta.nominalSize ? p.meta.nominalSize : { w: b.w, h: b.h };
       var a = Math.abs(p.area()) * q, c = p.cutLength() * q;
       tA += a; tC += c; tN += q;
       rows.push('<tr><td>' + (i + 1) + '</td><td>' + esc(p.name) + '</td><td>' + q + '</td><td>' +
-        Math.round(b.w) + '</td><td>' + Math.round(b.h) + '</td><td>' + p.thickness + '</td><td>' +
+        Math.round(n.w) + '</td><td>' + Math.round(n.h) + '</td><td>' + Math.round(b.w) + '×' + Math.round(b.h) + '</td><td>' + p.thickness + '</td><td>' +
         (GRAIN_CN[p.meta.grain] || '不限') + '</td><td>' +
         p.holes.length + '</td><td>' + p.pockets.length + '</td><td>' +
         (a / 1e6).toFixed(4) + '</td><td>' + Math.round(c) + '</td><td>' +
         esc(p.meta.note || '') + '</td></tr>');
     });
-    rows.push('</tbody><tfoot><tr><td colspan="2">合计</td><td>' + tN + '</td><td colspan="6"></td><td>' +
+    rows.push('</tbody><tfoot><tr><td colspan="2">合计</td><td>' + tN + '</td><td colspan="7"></td><td>' +
       (tA / 1e6).toFixed(4) + '</td><td>' + Math.round(tC) + '</td><td></td></tr></tfoot></table>');
     $('listPane').innerHTML = rows.join('');
   }
@@ -2041,7 +2042,7 @@
     var hi = Math.max(240, Math.min(560, Math.round(vw * 0.5)));
     return Math.round(G.clamp(+px || 0, 240, hi));
   }
-  /* 三视图低于 150px 就什么都看不清; 上面的表格至少要留 180px
+  /* 三视图低于 150px 就什么都看不清; 上面的表格至少要留 190px
    * (表头两行 + 两三行数据)。
    *
    * 坑: plan 是对 editPane 高度的百分比, 但 editPane 里除了表格和三视图
@@ -2062,7 +2063,9 @@
       var avail = h - chrome;                 // 表格 + 三视图 真正能分的高度
       if (avail > 340) {
         lo = 150 / h * 100;                   // 三视图不低于 150
-        hi = (avail - 180) / h * 100;         // 表格不低于 180
+        /* flex 的边框/滚动条会吃掉约 10px；按 190 夹才能保证实际可见
+         * 编辑表仍有 >=180px（两行表头 + 至少两行数据）。 */
+        hi = (avail - 190) / h * 100;
         if (hi < lo) hi = lo;
       }
     }
@@ -2073,7 +2076,15 @@
     layout.side = clampSide(layout.side);
     layout.plan = clampPlan(layout.plan);
     var sd = $('side');
-    if (sd) { sd.style.flex = '0 0 ' + layout.side + 'px'; sd.style.width = layout.side + 'px'; }
+    /* side 自己会纵向滚动。Windows 的传统滚动条占掉 content box 宽度，
+     * 视觉上“320px 参数栏”会变成 309px；把滚动条固定占位算进 flex 宽度，
+     * 才能保证用户拖到的数值就是实际可见参数宽度。 */
+    if (sd) {
+      var gutter = Math.max(0, sd.offsetWidth - sd.clientWidth);
+      var outer = layout.side + gutter;
+      sd.style.flex = '0 0 ' + outer + 'px';
+      sd.style.width = outer + 'px';
+    }
     var pw = $('planWrap');
     if (pw) pw.style.flexBasis = layout.plan + '%';
     var sv = $('splitV');

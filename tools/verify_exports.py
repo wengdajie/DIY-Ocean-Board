@@ -375,9 +375,10 @@ for key in sorted(D.keys()):
         '%d 列, 实际 %s' % (ncol, sorted(set(len(r) for r in prows))))
     chk('%s CSV 引号字段解析正确' % key, all(not any(f.count('"') % 2 for f in r) for r in prows))
     hdr = [h.lstrip('\ufeff') for h in prows[0]]
-    WANT_HDR = ['序号', '零件名', '数量', '长(mm)', '宽(mm)', '板厚(mm)', '纹理方向',
+    WANT_HDR = ['序号', '零件名', '数量', '标准长W(mm)', '标准宽D(mm)',
+                '下料包络长(mm)', '下料包络宽(mm)', '板厚(mm)', '纹理方向',
                 '通孔数', '铣槽数', '面积(m2)', '切割周长(mm)', '备注']
-    chk('%s CSV 表头 12 列完全一致' % key, hdr == WANT_HDR, hdr)
+    chk('%s CSV 表头 14 列完全一致' % key, hdr == WANT_HDR, hdr)
     # 逐行核对 数量 / 板厚 / 纹理 / 通孔数 / 铣槽数 / 切割周长
     GRAIN_CN = {'long': '横纹(顺长边)', 'cross': '竖纹(顺短边)', 'any': '不限'}
     if hdr == WANT_HDR:
@@ -390,33 +391,33 @@ for key in sorted(D.keys()):
                 bad_rows.append('%s 序号' % e['name'])
             if int(row[2]) != e['qty']:
                 bad_rows.append('%s 数量 %s vs %s' % (e['name'], row[2], e['qty']))
-            if abs(float(row[5]) - e['thickness']) > 1e-6:
-                bad_rows.append('%s 板厚 %s vs %s' % (e['name'], row[5], e['thickness']))
-            if row[6] != GRAIN_CN.get(e['grain'], '不限'):
-                bad_rows.append('%s 纹理 %s vs %s' % (e['name'], row[6], e['grain']))
-            if int(row[7]) != e['holes']:
-                bad_rows.append('%s 通孔数 %s vs %s' % (e['name'], row[7], e['holes']))
-            if int(row[8]) != e['pockets']:
-                bad_rows.append('%s 铣槽数 %s vs %s' % (e['name'], row[8], e['pockets']))
-            if abs(float(row[10]) - round(e['cutLength'])) > 1.5:
-                bad_rows.append('%s 周长 %s vs %s' % (e['name'], row[10], e['cutLength']))
-            if row[11] != e['note']:
+            if abs(float(row[7]) - e['thickness']) > 1e-6:
+                bad_rows.append('%s 板厚 %s vs %s' % (e['name'], row[7], e['thickness']))
+            if row[8] != GRAIN_CN.get(e['grain'], '不限'):
+                bad_rows.append('%s 纹理 %s vs %s' % (e['name'], row[8], e['grain']))
+            if int(row[9]) != e['holes']:
+                bad_rows.append('%s 通孔数 %s vs %s' % (e['name'], row[9], e['holes']))
+            if int(row[10]) != e['pockets']:
+                bad_rows.append('%s 铣槽数 %s vs %s' % (e['name'], row[10], e['pockets']))
+            if abs(float(row[12]) - round(e['cutLength'])) > 1.5:
+                bad_rows.append('%s 周长 %s vs %s' % (e['name'], row[12], e['cutLength']))
+            if row[13] != e['note']:
                 bad_rows.append('%s 备注' % e['name'])
         chk('%s CSV 每行 数量/板厚/纹理/孔数/铣槽/周长 全对' % key, not bad_rows, '; '.join(bad_rows[:4]))
         # 面积以 m² 给出, 且 = 外轮廓-通孔(不含 pocket)
         ok_area = 0
         for i, e in enumerate(exp):
-            if abs(float(prows[1 + i][9]) * 1e6 - e['area']) < max(60.0, e['area'] * 0.002):
+            if abs(float(prows[1 + i][11]) * 1e6 - e['area']) < max(60.0, e['area'] * 0.002):
                 ok_area += 1
         chk('%s CSV 面积(m2) 逐行对上且不含 pocket' % key, ok_area == len(exp), '%d/%d' % (ok_area, len(exp)))
         # 有 pocket 的行: 切割周长必须 > 外轮廓周长(说明 pocket 计入了走刀)
         pk_rows = [(i, e) for i, e in enumerate(exp) if e['pockets']]
         if pk_rows:
             okp = sum(1 for i, e in pk_rows
-                      if float(prows[1 + i][10]) > 2 * (e['w'] + e['h']) * 0.9)
+                      if float(prows[1 + i][12]) > 2 * (e['w'] + e['h']) * 0.9)
             chk('%s CSV pocket 计入切割周长' % key, okp == len(pk_rows), '%d/%d' % (okp, len(pk_rows)))
     chk('%s CSV 有 BOM(Excel 中文不乱码)' % key, csv.startswith('\ufeff'))
-    iw, ih, ia = hdr.index('长(mm)'), hdr.index('宽(mm)'), hdr.index('面积(m2)')
+    iw, ih, ia = hdr.index('下料包络长(mm)'), hdr.index('下料包络宽(mm)'), hdr.index('面积(m2)')
     found, why, afound = 0, [], 0
     for e in exp:
         hit = False

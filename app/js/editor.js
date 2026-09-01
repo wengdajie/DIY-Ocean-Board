@@ -582,7 +582,7 @@
       return;
     }
     var tbl = el('table');
-    var COLS = ['启用', '零件名', '长(mm)', '宽(mm)', '数量', '纹理', '四角', '角尺寸',
+    var COLS = ['启用', '零件名', '标准长 W(mm)', '标准宽 D(mm)', '数量', '纹理', '四角', '角尺寸',
       '洞洞板', 'Ø孔径', '孔距', '留边', '错排', '备注', '工艺', '操作'];
     var thead = el('thead'), htr = el('tr');
     COLS.forEach(function (h) { htr.appendChild(el('th', '', h)); });

@@ -245,6 +245,8 @@ try {
     chk('V角' + turn + '°: 圆心正好在尖点', Math.hypot(a.cx - C.x, a.cy - C.y) < 0.02,
       G.round(Math.hypot(a.cx - C.x, a.cy - C.y), 4));
     chk('V角' + turn + '°: 半径 = 刀半径', near(a.r, r, 0.02), G.round(a.r, 4));
+    chk('V角' + turn + '°: 小耳朵直径 = CNC 刀具直径', near(a.r * 2, r * 2, 0.04),
+      G.round(a.r * 2, 4));
     chk('V角' + turn + '°: 不自交', !si(rel));
   });
 })();

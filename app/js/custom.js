@@ -267,6 +267,8 @@
       var pt = new Part(pl.name, t);
       pt.setOuter(relief > 0 ? J.applyRelief(loop, relief, rtype, ropts) : loop);
       pt.qty = pl.qty;
+      /* 板位表的 W/D/H 是标准成品世界尺寸，不是榫头外包络。 */
+      pt.meta.nominalSize = { w: w, h: h };
       pt.meta.grain = pl.grain;
       /* 榫眼可能落进"搭接缺口"里 —— 那块料已经被切掉了, 孔开在空气上。
        * 典型触发: 用户加了一块贯通整宽的层板(与竖隔板互穿 -> 搭接),

@@ -38,21 +38,20 @@
 
   /* ---------------- 策略表 ---------------- */
   /* 排序口径: 先放"难安置"的大件, 小件留着填缝 */
-  var SORTS = [
-    { key: 'area',    cmp: function (a, b) { return (b.w * b.h) - (a.w * a.h); } },
+  var SORTS = [    { key: 'area',    cmp: function (a, b) { return (b.w * b.h) - (a.w * a.h); } },
     { key: 'maxside', cmp: function (a, b) { return Math.max(b.w, b.h) - Math.max(a.w, a.h); } },
     { key: 'height',  cmp: function (a, b) { return b.h - a.h; } },
     { key: 'width',   cmp: function (a, b) { return b.w - a.w; } },
-    { key: 'peri',    cmp: function (a, b) { return (b.w + b.h) - (a.w + a.h); } }
-  ];
+    { key: 'diff',    cmp: function (a, b) { return Math.abs(b.w - b.h) - Math.abs(a.w - a.h); } }  ];
   /* 放置口径(分数越小越优):
-   *   baf   Best Area Fit       选面积最接近的自由矩形 —— 整体最省料
-   *   bssf  Best Short Side Fit 让剩下的短边最小 —— 不留细长废条
-   *   blsf  Best Long Side Fit  让剩下的长边最小
-   *   bl    Bottom-Left         尽量压低 —— 对同高零件最整齐
-   *   shelf 货架式               旧算法, 留着当保底(保证不比从前差)
+   *   baf   Best Area Fit         选面积最接近的自由矩形 —— 整体最省料
+   *   bssf  Best Short Side Fit   让剩下的短边最小 —— 不留细长废条
+   *   blsf  Best Long Side Fit    让剩下的长边最小
+   *   bl    Bottom-Left           尽量压低 —— 对同高零件最整齐
+   *   bwf   Best Waste Fit        废料最短边最大化(剩料越方正越有用)
+   *   shelf 货架式                 旧算法, 留着当保底(保证不比从前差)
    */
-  var PLACERS = ['baf', 'bssf', 'blsf', 'bl', 'shelf'];
+  var PLACERS = ['baf', 'bssf', 'bwf', 'bl', 'shelf'];
 
   function strategies() {
     var out = [];
@@ -110,6 +109,7 @@
       case 'bssf': return { a: shortSide, b: longSide };
       case 'blsf': return { a: longSide, b: shortSide };
       case 'bl':   return { a: fr.y + h, b: fr.x };
+      case 'bwf':  return { a: -(Math.min(lw, lh)), b: fr.w * fr.h - w * h };  // 最短边越长越好(负号=越小越优)
       default:     return { a: fr.w * fr.h - w * h, b: shortSide };   // baf
     }
   }
@@ -155,29 +155,32 @@
 
     /* 货架式: 逐层码放, 层高 = 该层最高零件 */
     function shelfTry(s, bx) {
-      var cs = cands(bx), i, k;
+      var cs = cands(bx), i, k, best = null, bestSc = null;
       for (i = 0; i < cs.length; i++) {
         var c = cs[i];
         for (k = 0; k < s.shelves.length; k++) {
           var sh = s.shelves[k];
           if (c.h <= sh.h + EPS && sh.x + c.w <= boxW + EPS) {
-            return { x: sh.x, y: sh.y, c: c, shelf: sh };
+            var sc = scoreFit({ x: sh.x, y: sh.y, w: boxW - sh.x, h: sh.h }, c.w, c.h, 'baf');
+            if (better(sc, bestSc)) { bestSc = sc; best = { x: sh.x, y: sh.y, c: c, shelf: sh }; }
           }
         }
       }
-      // 开新货架（用第一个放得下的朝向）
+      if (best) return best;
+      // 开新货架：挑"层高更矮"的朝向，为后续留更多纵向空间
       var top = 0;
       if (s.shelves.length) {
         var last = s.shelves[s.shelves.length - 1];
         top = last.y + last.h;
       }
-      for (i = 0; i < cs.length; i++) {
-        var c2 = cs[i];
-        if (c2.w <= boxW + EPS && top + c2.h <= boxH + EPS) {
-          var ns = { x: 0, y: top, h: c2.h };
-          s.shelves.push(ns);
-          return { x: 0, y: top, c: c2, shelf: ns };
-        }
+      var fresh = cs.filter(function (c2) {
+        return c2.w <= boxW + EPS && top + c2.h <= boxH + EPS;
+      });
+      fresh.sort(function (a, b) { return (a.h - b.h) || (b.w - a.w); });
+      if (fresh.length) {
+        var c2 = fresh[0], ns = { x: 0, y: top, h: c2.h };
+        s.shelves.push(ns);
+        return { x: 0, y: top, c: c2, shelf: ns };
       }
       return null;
     }
@@ -261,15 +264,36 @@
     return (x1 - x0) * (y1 - y0);
   }
   function planScore(res) {
-    var span = 0;
-    res.sheets.forEach(function (s) { span += usedBBoxArea(s); });
-    return { sheetCount: res.sheets.length, oversize: res.oversize.length, span: span };
+    var span = 0, lastUtil = 0, maxOffcut = 0;
+    res.sheets.forEach(function (s, i) {
+      var bb = usedBBoxArea(s);
+      span += bb;
+      if (i === res.sheets.length - 1) {
+        lastUtil = bb / ((s.availW || 0) * (s.availH || 0) || 1);
+      }
+      if (s.offcut && s.offcut.w && s.offcut.h) {
+        var oa = s.offcut.w * s.offcut.h;
+        if (oa > maxOffcut) maxOffcut = oa;
+      }
+    });
+    return { sheetCount: res.sheets.length, oversize: res.oversize.length,
+             span: span, lastUtil: lastUtil, maxOffcut: maxOffcut };
   }
   function planBetter(a, b) {
     if (!b) return true;
     if (a.oversize !== b.oversize) return a.oversize < b.oversize;
     if (a.sheetCount !== b.sheetCount) return a.sheetCount < b.sheetCount;
-    return a.span < b.span - 1e-6;
+    // 主指标: 已用 bbox 总面积越小 = 零件越集中 = 剩料越完整
+    if (Math.abs(a.span - b.span) > 1e-3) return a.span < b.span - 1e-6;
+    // 次指标: 最后一张板利用率越高越好(排得越密)
+    if (a.lastUtil !== undefined && b.lastUtil !== undefined) {
+      if (Math.abs(a.lastUtil - b.lastUtil) > 1e-6) return a.lastUtil > b.lastUtil + 1e-6;
+    }
+    // 再次: 最大剩料面积越大越好(越可能再利用)
+    if (a.maxOffcut !== undefined && b.maxOffcut !== undefined) {
+      if (Math.abs(a.maxOffcut - b.maxOffcut) > 1e-3) return a.maxOffcut > b.maxOffcut + 1e-3;
+    }
+    return false;
   }
 
   /* ---------------- 最大剩余整料 ----------------
@@ -332,7 +356,7 @@
     var margin = sheet.margin === undefined ? 10 : sheet.margin;
     var gap = sheet.gap === undefined ? 6 : sheet.gap;
     var rot = sheet.allowRotate !== false;
-    var respectGrain = sheet.respectGrain !== false;
+    var respectGrain = sheet.respectGrain === true;
     var longIsX = SW >= SH;      // 幅面竖放时长边是 Y, 纹理约束的允许角度要跟着翻
 
     function allowedRots(part) {
@@ -361,8 +385,10 @@
     };
 
     /* 策略集: 零件极多时缩减规模, 保证交互不卡(仍覆盖两种排序 × 三种口径) */
-    var sortIdxs = [0, 1, 2, 3, 4], placers = PLACERS;
-    if (boxes.length > 260) { sortIdxs = [0, 1]; placers = ['baf', 'bssf', 'shelf']; }
+    var sortIdxs = [];
+    for (var si = 0; si < SORTS.length; si++) sortIdxs.push(si);
+    var placers = PLACERS;
+    if (boxes.length > 260) { sortIdxs = [0, 1]; placers = ['baf', 'bwf', 'shelf']; }
 
     var pick = null, pickScore = null, pickName = '', tried = 0;
     var only = sheet.strategy && sheet.strategy !== 'auto' ? String(sheet.strategy) : null;
@@ -424,7 +450,7 @@
     var errs = [];
     var margin = (sheet && sheet.margin !== undefined) ? sheet.margin : 10;
     var gap = (sheet && sheet.gap !== undefined) ? sheet.gap : null;
-    var respectGrain = !sheet || sheet.respectGrain !== false;
+    var respectGrain = !!(sheet && sheet.respectGrain === true);
     result.sheets.forEach(function (s, si) {
       s.placements.forEach(function (a, i) {
         if (respectGrain) {

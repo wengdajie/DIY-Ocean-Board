@@ -314,6 +314,9 @@ window.onload = function () {
         { name: '带槽面板', len: 600, wid: 400, qty: 1, grain: 'long',
           pockets: [{ ref: 'center', x: 0, y: 0, w: 300, h: 120, depth: 6 }] }
       ];
+      /* 这里验证纹理线的渲染方向，主动锁定纹理，避免被默认的最大利用率旋转策略干扰。 */
+      d.getElementById('respectGrain').checked = true;
+      d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
       w.__app.generate();
       chk('清单模式出 1 件带 pocket', cst.result.parts.length === 1 && cst.result.parts[0].pockets.length === 1,
         cst.result.parts.length + '/' + (cst.result.parts[0] ? cst.result.parts[0].pockets.length : 0));

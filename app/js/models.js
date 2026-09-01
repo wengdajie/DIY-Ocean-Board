@@ -278,6 +278,7 @@
     });
     var part = new Part(name, t);
     part.setOuter(rel1(panel(w, h, eg), rl));
+    part.meta.nominalSize = { w: w, h: h };
     keys.forEach(function (k) {
       var sp = edgeSpans[k];
       if (!sp) return;

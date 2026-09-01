@@ -323,12 +323,15 @@
   function toCSV(parts, opts) {
     opts = opts || {};
     var GRAIN = { long: '横纹(顺长边)', cross: '竖纹(顺短边)', any: '不限' };
-    var rows = [['序号', '零件名', '数量', '长(mm)', '宽(mm)', '板厚(mm)', '纹理方向',
+    var rows = [['序号', '零件名', '数量', '标准长W(mm)', '标准宽D(mm)',
+      '下料包络长(mm)', '下料包络宽(mm)', '板厚(mm)', '纹理方向',
       '通孔数', '铣槽数', '面积(m2)', '切割周长(mm)', '备注']];
     parts.forEach(function (p, i) {
       var b = p.bbox();
+      var n = p.meta && p.meta.nominalSize ? p.meta.nominalSize : { w: b.w, h: b.h };
       rows.push([
-        i + 1, p.name, p.qty, G.round(b.w, 1), G.round(b.h, 1), p.thickness,
+        i + 1, p.name, p.qty, G.round(n.w, 1), G.round(n.h, 1),
+        G.round(b.w, 1), G.round(b.h, 1), p.thickness,
         GRAIN[p.meta.grain] || GRAIN.any,
         p.holes.length, p.pockets.length,
         G.round(Math.abs(p.area()) / 1e6, 4), G.round(p.cutLength(), 0), p.meta.note || ''
