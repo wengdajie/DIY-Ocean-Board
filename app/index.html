@@ -186,6 +186,24 @@
     <div class="row"><label>锁定纹理方向</label><input type="checkbox" id="respectGrain"></div>
     <p class="hint">默认允许零件旋转 90°，自动寻找更高利用率；只有板面纹理必须固定时才勾选此项。</p>
 
+    <h2>材料与成本</h2>
+    <div class="row"><label>板材芯材</label>
+      <select id="matDensity">
+        <option value="birch" selected>桦木（海洋板典型 · 700 kg/m³）</option>
+        <option value="euc">桉木/硬杂（620）</option>
+        <option value="pine">松木（600）</option>
+        <option value="poplar">杨木（550）</option>
+        <option value="custom">自定义密度…</option>
+      </select>
+    </div>
+    <div class="row" id="densCustomRow" style="display:none"><label>自定义密度</label>
+      <input type="number" id="matDensityCustom" value="700" step="10" min="200" max="1500"><span class="unit">kg/m³</span>
+    </div>
+    <div class="row"><label>整张单价</label>
+      <input type="number" id="sheetPrice" value="0" step="10" min="0"><span class="unit">¥</span>
+    </div>
+    <p class="hint">净重 = Σ(净面积 × 板厚) × 密度，已在统计条与料单页实时更新；单价填了之后按<b>整张采购口径</b>估材料成本（剩料不折价）。桦木海洋板密度实测多在 650–750 kg/m³。</p>
+
     <h2>榫卯参数</h2>
     <div class="row" id="jsRow"><label>接合方式</label>
       <select id="jointStyle"></select>
@@ -273,6 +291,9 @@
     </div>
     <div class="btns">
       <button id="btnSvg">SVG</button>
+      <button id="btnSvgSheet" title="带图框、尺寸标注线、孔位引出与标题栏的工程图纸（可打印）">工程图纸 SVG</button>
+    </div>
+    <div class="btns">
       <button id="btnCsv">料单 CSV</button>
       <button id="btnJson">参数 JSON</button>
     </div>
@@ -280,7 +301,7 @@
       <button id="btnFeatCsv">加工清单 CSV（孔/槽坐标）</button>
     </div>
     <div class="btns">
-      <button id="btnExportAll" title="DXF×2 + SVG + 料单 CSV + 加工清单 CSV + 参数 JSON 一次写完">导出全部（6 个文件）</button>
+      <button id="btnExportAll" title="DXF×2 + SVG×2(排样/工程图纸) + 料单 CSV + 加工清单 CSV + 参数 JSON 一次写完">导出全部（7 个文件）</button>
     </div>
   </aside>
 
@@ -314,6 +335,7 @@
           <span class="chip" data-asmview="2" title="正视 (2)">正视</span>
           <span class="chip" data-asmview="3" title="侧视 (3)">侧视</span>
           <span class="chip" data-asmview="4" title="俯视 (4)">俯视</span>
+          <span class="chip" id="asmSpin" title="自动旋转展示（拖动即停）">展台旋转</span>
           <span class="sepv"></span>
           <label class="expLab">爆炸
             <input type="range" id="asmExplode" min="0" max="120" step="5" value="0">
@@ -344,6 +366,7 @@
 
 <script src="js/geom.js"></script>
 <script src="js/joints.js"></script>
+<script src="js/dim.js"></script>
 <script src="js/part.js"></script>
 <script src="js/models.js"></script>
 <script src="js/imagetrace.js"></script>

@@ -1,0 +1,161 @@
+<!doctype html><meta charset="utf-8">
+<body><pre id="out">running</pre>
+<script src="../js/geom.js"></script>
+<script src="../js/dim.js"></script>
+<script src="../js/part.js"></script>
+<script>
+var L = [], P = 0, F = 0;
+function log(s) { L.push(s); }
+function chk(name, cond, extra) {
+  log((cond ? 'PASS ' : 'FAIL ') + name + (extra !== undefined ? '  [' + extra + ']' : ''));
+  if (cond) P++; else F++;
+}
+function near(a, b, t) { return Math.abs(a - b) < (t || 1e-6); }
+
+try {
+// ---------- 1. forPart 数据 ----------
+var pt = new Part('测试板', 15);
+pt.setOuter(G.rect(0, 0, 600, 300));
+pt.addHole(G.circle(100, 150, 40));     // Ø40 圆孔
+pt.addHole(G.rect(400, 50, 80, 40));      // 矩形孔
+pt.addPocket(G.rect(200, 200, 120, 40), 6, '背板槽');
+
+var d = Dim.forPart(pt);
+chk('forPart: 名称/厚/数量', d.name === '测试板' && d.thickness === 15 && d.qty === 1);
+chk('forPart: 总体尺寸两条', d.overall.length === 2);
+chk('forPart: 宽=600 高=300',
+  d.overall[0].text === '600' && d.overall[1].text === '300',
+  d.overall.map(function (o) { return o.text; }).join(','));
+chk('forPart: 孔 2 个', d.holes.length === 2);
+chk('forPart: 圆孔标 Ø40', d.holes[0].circle === true && d.holes[0].label.indexOf('40') >= 0, d.holes[0].label);
+chk('forPart: 矩形孔标 80×40', d.holes[1].circle === false && d.holes[1].label === '80×40', d.holes[1].label);
+chk('forPart: 孔圆心', near(d.holes[0].x, 100) && near(d.holes[0].y, 150));
+chk('forPart: 铣槽 1 个 + 深度入标',
+  d.pockets.length === 1 && /6/.test(d.pockets[0].label), d.pockets[0] && d.pockets[0].label);
+
+// maxHoleLabels 截断
+var pt2 = new Part('洞洞板', 9);
+pt2.setOuter(G.rect(0, 0, 900, 700));
+for (var i = 0; i < 20; i++) pt2.addHole(G.circle(50 + (i % 5) * 100, 50 + Math.floor(i / 5) * 100, 5));
+var d2 = Dim.forPart(pt2, { maxHoleLabels: 10 });
+chk('forPart: maxHoleLabels 截断到 10', d2.holes.length === 10);
+
+// ---------- 2. entities 几何 ----------
+var E = Dim.entities(d, { u: 4 });
+var kinds = {};
+E.forEach(function (e) { kinds[e.kind || e.type] = (kinds[e.kind || e.type] || 0) + 1; });
+chk('entities: 有尺寸线/延伸线/箭头/文字',
+  !!kinds.dim && !!kinds.ext && !!kinds.arrow && !!kinds.dimtext, JSON.stringify(kinds));
+/* 宽度尺寸线: 在 bbox 下方, 两箭头分别指向 x=0 与 x=600 */
+var dimX = E.filter(function (e) {
+  return e.type === 'poly' && near(e.pts[0].x, 0, 0.01);
+});
+chk('entities: 宽度箭头钉在 x=0', dimX.length >= 1);
+var dimX2 = E.filter(function (e) {
+  return e.type === 'poly' && near(e.pts[0].x, 600, 0.01);
+});
+chk('entities: 宽度箭头钉在 x=600', dimX2.length >= 1);
+/* 高度尺寸线在左侧: 尺寸线 x = 0 - off */
+var vLines = E.filter(function (e) {
+  return e.type === 'line' && e.kind === 'dim' && e.x1 === e.x2 && e.x1 < 0;
+});
+chk('entities: 高度尺寸线在板左侧(x<0)', vLines.length === 1, vLines.length);
+if (vLines.length) {
+  chk('entities: 高度尺寸线跨 y0..y1',
+    near(Math.min(vLines[0].y1, vLines[0].y2), 0, 0.01) &&
+    near(Math.max(vLines[0].y1, vLines[0].y2), 300, 0.01));
+}
+/* u 影响标注偏移: u 翻倍 -> 偏移变大 */
+var E2 = Dim.entities(d, { u: 8 });
+var v2 = E2.filter(function (e) { return e.type === 'line' && e.kind === 'dim' && e.x1 === e.x2 && e.x1 < 0; });
+chk('entities: u 加大偏移更远', v2.length === 1 && v2[0].x1 < vLines[0].x1,
+  v2.length ? v2[0].x1 + ' vs ' + (vLines[0] && vLines[0].x1) : 'none');
+/* 孔引出线: 从孔圆心附近出发 */
+var lead = E.filter(function (e) { return e.kind === 'leader'; });
+chk('entities: 孔有引出线', lead.length >= 2, lead.length);
+/* 文字都在板外侧/孔旁, 不出界太多: 只查数字文字存在 */
+var txts = E.filter(function (e) { return e.type === 'text'; });
+chk('entities: 文字含 600/300/Ø40/80×40',
+  ['600', '300', 'Ø40', '80×40'].every(function (t) {
+    return txts.some(function (x) { return x.s === t; });
+  }), txts.map(function (t) { return t.s; }).join('|'));
+
+// ---------- 3. titleBlock ----------
+var TB = Dim.titleBlock(d, { u: 4 });
+chk('titleBlock: 有框线与三行文字',
+  TB.ents.some(function (e) { return e.kind === 'frame'; }) &&
+  TB.ents.filter(function (e) { return e.kind === 'titletext'; }).length === 3);
+chk('titleBlock: 位置在零件右下', TB.box.x1 <= d.bbox.x1 + 1e-6 && TB.box.y1 <= d.bbox.y0 + 1e-6 + 200,
+  JSON.stringify(TB.box));
+chk('titleBlock: 名字入标', TB.ents.some(function (e) { return e.s === '测试板'; }));
+
+// ---------- 4. 三端渲染一致性 ----------
+// Canvas: drawEnts 不抛错即可(像素断言交给 test-visual)
+var cv = document.createElement('canvas'); cv.width = 400; cv.height = 300;
+var g = cv.getContext('2d');
+var T = function (q) { return { x: q.x * 0.3 + 120, y: 150 - q.y * 0.3 }; };
+try { Dim.drawEnts(g, T, E, {}); chk('drawEnts: canvas 渲染不抛错', true); }
+catch (e) { chk('drawEnts: canvas 渲染不抛错', false, e.message); }
+
+// SVG: 片段可拼接, 数量与实体数一致
+var svgOut = Dim.svgEnts(E, {});
+chk('svgEnts: 输出片段数 = 实体数', svgOut.length === E.length, svgOut.length + ' vs ' + E.length);
+chk('svgEnts: line/polygon/text 标签正确',
+  svgOut.every(function (s, i) {
+    var t = E[i].type;
+    return (t === 'line' && s.slice(0, 5) === '<line') ||
+           (t === 'poly' && s.slice(0, 8) === '<polygon') ||
+           (t === 'text' && s.slice(0, 5) === '<text');
+  }));
+chk('svgEnts: 转义生效', Dim.svgEnts([{ type: 'text', x: 0, y: 0, s: 'a<b>&c', size: 3 }])[0].indexOf('a&lt;b&gt;&amp;c') >= 0);
+
+// DXF: 组码成对、LINE/SOLID/TEXT 实体类型正确
+var dx = Dim.dxfEnts(E, 'DIM');
+chk('dxfEnts: 有实体', dx.length > 10);
+var isPair = true;
+for (var k = 0; k + 1 < dx.length; k += 2) {
+  if (!/^-?\d+$/.test(dx[k])) { isPair = false; break; }
+}
+chk('dxfEnts: 组码-值成对', isPair);
+var nLine = 0, nSolid = 0, nText = 0;
+for (var k2 = 0; k2 < dx.length; k2 += 2) {
+  if (dx[k2] === '0' && dx[k2 + 1] === 'LINE') nLine++;
+  if (dx[k2] === '0' && dx[k2 + 1] === 'SOLID') nSolid++;
+  if (dx[k2] === '0' && dx[k2 + 1] === 'TEXT') nText++;
+}
+chk('dxfEnts: LINE/SOLID/TEXT 分类计数',
+  nLine === E.filter(function (e) { return e.type === 'line'; }).length &&
+  nSolid === E.filter(function (e) { return e.type === 'poly'; }).length &&
+  nText === E.filter(function (e) { return e.type === 'text'; }).length,
+  [nLine, nSolid, nText].join('/'));
+
+// ---------- 5. CAD 集成: toDXF 带 DIM 层 / toSheetSVG ----------
+var dxfAll = CAD.toDXF([{ part: pt, xf: null }], { dims: true });
+chk('toDXF dims: 出 DIM 层定义', dxfAll.indexOf('DIM') >= 0);
+chk('toDXF dims: 出 SOLID 箭头', dxfAll.indexOf('SOLID') >= 0);
+chk('toDXF dims: 标注文字进 DIM 层', /8\r?\nDIM/.test(dxfAll));
+var dxfNoDim = CAD.toDXF([{ part: pt, xf: null }], {});
+chk('toDXF 默认: 不出 DIM 层', dxfNoDim.indexOf('SOLID') < 0);
+
+/* xf 变换后的标注: 旋转 90 度, 宽度箭头应钉在新的 y 轴上 */
+var dxfRot = CAD.toDXF([{ part: pt, xf: { rot: 90, tx: 100, ty: 0 } }], { dims: true });
+chk('toDXF dims+xf: 正常出图不抛错', dxfRot.indexOf('EOF') >= 0 && dxfRot.length > 500);
+
+var sheet = CAD.toSheetSVG([pt, pt2], {});
+chk('toSheetSVG: 是 SVG 且有图框', sheet.slice(0, 5) === '<?xml' && sheet.indexOf('零件图纸') >= 0);
+chk('toSheetSVG: 两个零件两个图框',
+  (sheet.match(/fill="#ffffff" stroke="#c9bda3"/g) || []).length === 2);
+chk('toSheetSVG: 总标题栏在右下', sheet.indexOf('净面积') >= 0 && sheet.indexOf('日期') >= 0);
+chk('toSheetSVG: 尺寸数字 600/300 出现', sheet.indexOf('>600<') >= 0 && sheet.indexOf('>300<') >= 0);
+chk('toSheetSVG: 空零件退化为 toSVG',
+  CAD.toSheetSVG([], {}).indexOf('<svg') >= 0);
+
+} catch (e) {
+  log('FAIL 套件异常: ' + (e && e.stack || e));
+  F++;
+}
+document.getElementById('out').textContent = L.join('\n') +
+  '\n\nTOTAL ' + (P + F) + ' FAILS ' + F;
+document.title = F ? 'FAIL ' + F : 'ALL PASS';
+</script>
+</body>

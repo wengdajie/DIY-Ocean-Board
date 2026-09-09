@@ -229,6 +229,24 @@
     };
   }
 
+  /* ---------- 材料与成本 ----------
+   * 重量 = Σ(净面积 × 板厚) × 密度。密度按木材芯材给典型值:
+   * 桦木(海洋板最常见) 700 / 桉木硬杂 620 / 杨木 550 / 松木 600 kg/m³。
+   * 海洋板(船级)多用桦木或_okoume_面, 密度落在 650~750, 取中比较稳。
+   * 成本 = 整张数 × 单价(整张采购口径, 剩料不折价)。 */
+  var DENSITIES = { birch: 700, euc: 620, poplar: 550, pine: 600 };
+  function materialOpts() {
+    var sel = $('matDensity') ? $('matDensity').value : 'birch';
+    var dens = DENSITIES[sel];
+    if (dens === undefined) {
+      var v = parseFloat($('matDensityCustom') ? $('matDensityCustom').value : NaN);
+      dens = (isFinite(v) && v >= 200 && v <= 1500) ? v : 700;
+    }
+    var price = parseFloat($('sheetPrice') ? $('sheetPrice').value : NaN);
+    price = (isFinite(price) && price > 0) ? price : 0;
+    return { density: dens, price: price, key: sel };
+  }
+
   /* ---------- 生成 ---------- */
   /* ---------- 各模式统一入口: 返回 {parts, warnings, info} ---------- */
   function buildResult(p) {
@@ -400,20 +418,26 @@
   }
 
   function showStat(r, p) {
-    var area = 0, cut = 0, n = 0;
+    var area = 0, cut = 0, n = 0, vol = 0;
     r.parts.forEach(function (pt) {
       var q = pt.qty || 1;
       area += Math.abs(pt.area()) * q; cut += pt.cutLength() * q; n += q;
+      vol += Math.abs(pt.area()) * pt.thickness * q;   // mm³, 供重量估算
     });
     var st = state.nest.stats;
+    var mo = materialOpts();
+    var weight = vol / 1e9 * mo.density;               // mm³ -> m³ -> kg
     var info = r.info || {};
     var bits = [
       '零件 <b>' + n + '</b> 件',
       '板材 <b>' + st.sheetCount + '</b> 张 (' + st.sheetW + '×' + st.sheetH + ')',
       '利用率 <b>' + (st.utilization * 100).toFixed(1) + '%</b>',
       '净面积 <b>' + (area / 1e6).toFixed(3) + '</b> m²',
-      '切割长度 <b>' + (cut / 1000).toFixed(2) + '</b> m'
+      '切割长度 <b>' + (cut / 1000).toFixed(2) + '</b> m',
+      '净重 <b>' + weight.toFixed(1) + '</b> kg'
     ];
+    if (mo.price > 0) bits.push('材料成本 ≈ <b>¥' + Math.round(st.sheetCount * mo.price) +
+      '</b>（' + st.sheetCount + ' 张 × ¥' + mo.price + '）');
     if (info.cornerFingers) bits.push('角部榫齿 <b>' + info.cornerFingers + '</b> 齿 / 齿宽 <b>' + info.fingerWidth + '</b>mm');
     if (info.inner) bits.push('内净空 <b>' + info.inner.map(Math.round).join('×') + '</b>');
     if (info.grid) bits.push('格 <b>' + info.grid + '</b> / 单格 ' + info.cell.join('×'));
@@ -455,24 +479,34 @@
     return m;
   })();
   function buildList(parts) {
+    var mo = materialOpts();
     var rows = ['<table><thead><tr><th>#</th><th>零件</th><th>数量</th><th>标准长 W(mm)</th><th>标准宽 D(mm)</th><th>下料包络(mm)</th><th>厚</th>' +
-      '<th>纹理</th><th>通孔</th><th>铣槽</th><th>面积(m²)</th><th>切割(mm)</th><th>说明</th></tr></thead><tbody>'];
-    var tA = 0, tC = 0, tN = 0;
+      '<th>纹理</th><th>通孔</th><th>铣槽</th><th>面积(m²)</th><th>重量(kg)</th><th>切割(mm)</th><th>说明</th></tr></thead><tbody>'];
+    var tA = 0, tC = 0, tN = 0, tW = 0;
     parts.forEach(function (p, i) {
       var b = p.bbox(), q = p.qty || 1;
       var n = p.meta && p.meta.nominalSize ? p.meta.nominalSize : { w: b.w, h: b.h };
       var a = Math.abs(p.area()) * q, c = p.cutLength() * q;
-      tA += a; tC += c; tN += q;
+      var wKg = Math.abs(p.area()) * p.thickness * q / 1e9 * mo.density;
+      tA += a; tC += c; tN += q; tW += wKg;
       rows.push('<tr><td>' + (i + 1) + '</td><td>' + esc(p.name) + '</td><td>' + q + '</td><td>' +
         Math.round(n.w) + '</td><td>' + Math.round(n.h) + '</td><td>' + Math.round(b.w) + '×' + Math.round(b.h) + '</td><td>' + p.thickness + '</td><td>' +
         (GRAIN_CN[p.meta.grain] || '不限') + '</td><td>' +
         p.holes.length + '</td><td>' + p.pockets.length + '</td><td>' +
-        (a / 1e6).toFixed(4) + '</td><td>' + Math.round(c) + '</td><td>' +
+        (a / 1e6).toFixed(4) + '</td><td>' + wKg.toFixed(2) + '</td><td>' + Math.round(c) + '</td><td>' +
         esc(p.meta.note || '') + '</td></tr>');
     });
     rows.push('</tbody><tfoot><tr><td colspan="2">合计</td><td>' + tN + '</td><td colspan="7"></td><td>' +
-      (tA / 1e6).toFixed(4) + '</td><td>' + Math.round(tC) + '</td><td></td></tr></tfoot></table>');
-    $('listPane').innerHTML = rows.join('');
+      (tA / 1e6).toFixed(4) + '</td><td>' + tW.toFixed(2) + '</td><td>' + Math.round(tC) + '</td><td></td></tr></tfoot></table>');
+    /* 成本摘要: 整张采购口径 */
+    var st = state.nest && state.nest.stats;
+    var note = '<div class="costNote"><b>' + tW.toFixed(1) + ' kg</b>（密度 ' + mo.density +
+      ' kg/m³' + (mo.key === 'custom' ? '，自定义' : '') + '）';
+    if (st) note += ' · 用板 <b>' + st.sheetCount + '</b> 张 · 板材利用率 ' + (st.utilization * 100).toFixed(1) + '%';
+    if (mo.price > 0 && st) note += ' · 材料成本 ≈ <b>¥' + Math.round(st.sheetCount * mo.price) +
+      '</b>（' + st.sheetCount + ' 张 × ¥' + mo.price + '，剩料未折价）';
+    note += '</div>';
+    $('listPane').innerHTML = rows.join('') + note;
   }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
@@ -948,7 +982,16 @@
         name: function () { return '\u6d77\u6d0b\u677f-\u96f6\u4ef6-' + stamp() + '.dxf'; },
         mime: 'image/vnd.dxf',
         ready: function () { return hasParts() ? '' : '\u8fd8\u6ca1\u6709\u96f6\u4ef6\u53ef\u5bfc\u51fa'; },
-        text: function () { return CAD.toDXF(partItems(), { kerf: kerf() }); }
+        /* dims: 附带 DIM 图层(总体尺寸/孔位引出/标题栏), 与屏幕零件详图同源 */
+        text: function () { return CAD.toDXF(partItems(), { kerf: kerf(), dims: true }); }
+      },
+      {
+        key: 'svgSheet', btn: 'btnSvgSheet',
+        name: function () { return '\u6d77\u6d0b\u677f-\u5de5\u7a0b\u56fe\u7eb8-' + stamp() + '.svg'; },
+        mime: 'image/svg+xml',
+        ready: function () { return hasParts() ? '' : '\u8fd8\u6ca1\u6709\u96f6\u4ef6\u53ef\u5bfc\u51fa'; },
+        /* 一张 A3 风格的图纸: 图框 + 每零件尺寸标注 + 孔位引出 + 标题栏 */
+        text: function () { return CAD.toSheetSVG(state.result.parts, { kerf: kerf() }); }
       },
       {
         key: 'svg', btn: 'btnSvg',
@@ -1271,10 +1314,14 @@
     });
     ['width', 'depth', 'height', 'thickness', 'fit', 'jointStyle', 'lapStyle', 'dovetailAngle', 'fingerW',
       'machine', 'toolDia', 'earLen', 'reliefType', 'kerf', 'sheetSize', 'margin', 'gap', 'nestStrategy',
-      'realThickness', 'respectGrain'].concat(JSX_FIELDS).forEach(function (id) {
+      'realThickness', 'respectGrain', 'matDensity', 'matDensityCustom', 'sheetPrice'].concat(JSX_FIELDS).forEach(function (id) {
         var el = $(id);
         if (el) el.addEventListener('change', function () { syncVis(); generate(); });
       });
+    /* 自定义密度行的显隐: 选了"自定义密度…"才亮出来 */
+    $('matDensity').addEventListener('change', function () {
+      $('densCustomRow').style.display = this.value === 'custom' ? '' : 'none';
+    });
     $('btnGen').onclick = generate;
     $('btnFit').onclick = function () {
       state.view.nest = { zoom: 1, panX: 0, panY: 0 };
@@ -1323,6 +1370,24 @@
         draw();
       });
     }
+    /* 展台旋转: 自动绕 z 轴慢转, 展示/录屏用。
+     * 再点一次或手动拖动即停 —— 拖动会改 ang, 转着转着被拽走很诡异。 */
+    var spinChip = $('asmSpin');
+    function asmSpinLoop() {
+      var v = state.view.asm;
+      if (!v.spin || state.pane !== 'asm') { v._raf = 0; return; }
+      v.ang = (v.ang + 0.3) % 360;
+      draw();
+      v._raf = requestAnimationFrame(asmSpinLoop);
+    }
+    function setAsmSpin(on) {
+      var v = state.view.asm;
+      v.spin = !!on;
+      if (spinChip) spinChip.classList.toggle('on', v.spin);
+      if (v.spin && !v._raf) v._raf = requestAnimationFrame(asmSpinLoop);
+    }
+    if (spinChip) spinChip.addEventListener('click', function () { setAsmSpin(!state.view.asm.spin); });
+    ca.addEventListener('mousedown', function () { if (state.view.asm.spin) setAsmSpin(false); });
 
     var asmDragged = false;
     drag(ca, function (dx, dy, ev) {

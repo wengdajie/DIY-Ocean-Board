@@ -201,13 +201,43 @@
       '40', f(m.size), '1', m.s, '50', f(m.rot || 0), '72', '1', '11', f(m.x), '21', f(m.y), '31', '0.0'];
   }
 
-  // parts: [{part, xf}] 或 Part[]; opts: {kerf, layerCut, layerMark, splitArcs}
+  /* ---------------- 尺寸标注(dims)的工具 ----------------
+   * dim.js 的中性实体在零件局部坐标里, 导出前要跟着 xf 走一遍。
+   * 文字的旋转角累加; 镜像时锚点 start/end 互换。 */
+  function xformEnts(ents, xf) {
+    if (!xf) return ents;
+    var r = (xf.rot || 0) * G.D2R, c = Math.cos(r), s = Math.sin(r);
+    function P(x, y) {
+      var xx = xf.mx ? -x : x;
+      return { x: xx * c - y * s + (xf.tx || 0), y: xx * s + y * c + (xf.ty || 0) };
+    }
+    return ents.map(function (e) {
+      if (e.type === 'line') {
+        var a = P(e.x1, e.y1), b = P(e.x2, e.y2);
+        return { type: 'line', x1: a.x, y1: a.y, x2: b.x, y2: b.y, kind: e.kind };
+      }
+      if (e.type === 'poly') {
+        return { type: 'poly', pts: e.pts.map(function (q) { return P(q.x, q.y); }), kind: e.kind };
+      }
+      var t = P(e.x, e.y);
+      var anc = e.anchor;
+      if (xf.mx) anc = anc === 'end' ? 'start' : (anc === 'start' ? 'end' : anc);
+      return {
+        type: 'text', x: t.x, y: t.y, s: e.s, size: e.size,
+        rot: (e.rot || 0) + (xf.rot || 0), kind: e.kind, anchor: anc, bold: e.bold
+      };
+    });
+  }
+
+  // parts: [{part, xf}] 或 Part[]; opts: {kerf, layerCut, layerMark, splitArcs, dims}
   function toDXF(items, opts) {
     opts = opts || {};
     var LC = opts.layerCut || 'CUT', LM = opts.layerMark || 'MARK';
     var LP = opts.layerPocket || 'POCKET';
-    var bb = null, ents = [], pockEnts = [];
+    var LD = opts.layerDim || 'DIM';
+    var bb = null, ents = [], pockEnts = [], dimEnts = [];
     items.forEach(function (it) {
+      var src = it.part || it;
       var p = it.part ? (it.xf ? it.part.transformed(it.xf) : it.part) : it;
       var loops = opts.kerf ? p.compensated(opts.kerf) : p.loops();
       loops.forEach(function (l) {
@@ -235,12 +265,26 @@
         if (m.type === 'text') ents = ents.concat(dxfText(m, LM));
         else if (m.type === 'circle' && m.d > 0) ents = ents.concat(dxfCircleMark(m, LM));
       });
+      /* 尺寸标注层: DIM 上画总体尺寸/孔位引出/标题栏,
+       * 几何与屏幕预览、SVG 导出共用 dim.js 的同一份实体。 */
+      if (opts.dims && global.Dim && src.outer) {
+        var dE = xformEnts(global.Dim.entities(global.Dim.forPart(src), { u: 4 }), it.xf);
+        var dT = xformEnts(global.Dim.titleBlock(global.Dim.forPart(src), { u: 4 }).ents, it.xf);
+        dE = dE.concat(dT);
+        dE.forEach(function (e) {
+          if (e.type === 'line') bb = G.bboxUnion(bb, { x0: Math.min(e.x1, e.x2), y0: Math.min(e.y1, e.y2), x1: Math.max(e.x1, e.x2), y1: Math.max(e.y1, e.y2) });
+          else if (e.type === 'text') bb = G.bboxUnion(bb, { x0: e.x, y0: e.y, x1: e.x, y1: e.y });
+        });
+        dimEnts = dimEnts.concat(global.Dim.dxfEnts(dE, LD));
+      }
     });
-    ents = ents.concat(pockEnts);
+    ents = ents.concat(pockEnts).concat(dimEnts);
     bb = bb || { x0: 0, y0: 0, x1: 100, y1: 100 };
+    var layers = [{ name: LC, color: 7 }, { name: LM, color: 3 }, { name: LP, color: 5 }];
+    if (opts.dims) layers.push({ name: LD, color: 1 });
     var out = []
       .concat(dxfHeader(bb))
-      .concat(dxfTables([{ name: LC, color: 7 }, { name: LM, color: 3 }, { name: LP, color: 5 }]))
+      .concat(dxfTables(layers))
       .concat(['0', 'SECTION', '2', 'ENTITIES'])
       .concat(ents)
       .concat(['0', 'ENDSEC', '0', 'EOF']);
@@ -319,6 +363,108 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  /* ---------------- 工程图纸 SVG(每零件一框 + 总体标注 + 标题栏) ----------------
+   * 与"零件详图"屏幕视图同一套 dim.js 几何, 但按 A 幅面横排:
+   *   · 图纸外框 + 右下角总标题栏(项目/日期/件数/材质/板厚)
+   *   · 每个零件一个图框: 轮廓 + 尺寸标注线 + 孔位引出 + 零件标题栏
+   * 文字高按图纸 mm 计 3.5mm(制图标准), 零件按各自缩放适配图框。
+   */
+  function toSheetSVG(parts, opts) {
+    opts = opts || {};
+    var Dim2 = global.Dim;
+    if (!Dim2) return toSVG(parts, opts);
+    parts = (parts || []).filter(function (p) { return p.outer; });
+    if (!parts.length) return toSVG([], opts);
+    var SW = 420;                       // A3 横向宽
+    var M = 14, GAP = 18, CELL_H = 175, HEAD = 26;
+    var cols = Math.max(1, Math.ceil(Math.sqrt(parts.length * (SW / (CELL_H + GAP)) / 2.2) * 1.15));
+    cols = Math.min(cols, parts.length, 3);
+    var rows = Math.ceil(parts.length / cols);
+    var cellW = (SW - M * 2 - GAP * (cols - 1)) / cols;
+    var SH = M * 2 + HEAD + rows * CELL_H + (rows - 1) * GAP + 8;
+    var out = [];
+    out.push('<?xml version="1.0" encoding="UTF-8"?>');
+    out.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + SW + 'mm" height="' + G.round(SH, 1) +
+      'mm" viewBox="0 0 ' + SW + ' ' + G.round(SH, 1) + '">');
+    out.push('<rect x="0" y="0" width="' + SW + '" height="' + G.round(SH, 1) + '" fill="#fffdf8"/>');
+    /* 图纸外框(双线) */
+    out.push('<rect x="6" y="6" width="' + (SW - 12) + '" height="' + G.round(SH - 12, 1) +
+      '" fill="none" stroke="#8a7e6c" stroke-width="0.8"/>');
+    out.push('<rect x="9" y="9" width="' + (SW - 18) + '" height="' + G.round(SH - 18, 1) +
+      '" fill="none" stroke="#8a7e6c" stroke-width="0.35"/>');
+    /* 页眉 */
+    out.push('<text x="' + (M + 4) + '" y="' + (M + 16) + '" font-size="7" font-weight="700" fill="#2a251c">海洋板 DIY · 榫卯 CAD · 零件图纸</text>');
+    var date = new Date();
+    var ds = date.getFullYear() + '-' + ('0' + (date.getMonth() + 1)).slice(-2) + '-' + ('0' + date.getDate()).slice(-2);
+    out.push('<text x="' + (SW - M - 4) + '" y="' + (M + 16) + '" font-size="5.5" text-anchor="end" fill="#6b6152">' +
+      ds + ' · 共 ' + parts.length + ' 件</text>');
+
+    parts.forEach(function (p, i) {
+      var col = i % cols, row = Math.floor(i / cols);
+      var cx = M + col * (cellW + GAP), cy = M + HEAD + row * (CELL_H + GAP);
+      var b = p.bbox();
+      /* 图框 */
+      out.push('<rect x="' + G.round(cx, 1) + '" y="' + G.round(cy, 1) + '" width="' + G.round(cellW, 1) +
+        '" height="' + CELL_H + '" fill="#ffffff" stroke="#c9bda3" stroke-width="0.5"/>');
+      /* 零件缩放: 留出标注/标题栏空间 */
+      var padL = 34, padB = 52, padT = 12, padR = 12;
+      var sk = Math.min((cellW - padL - padR) / Math.max(1, b.w), (CELL_H - padT - padB) / Math.max(1, b.h));
+      sk = Math.min(sk, 1.5);
+      var u = 3.5 / sk;               // 字高恒定 3.5mm(图纸单位)
+      /* 局部 mm -> 图纸 mm: y 翻转 + 平移, 原点定在图框内左中 */
+      var TX = cx + padL + (cellW - padL - padR - b.w * sk) / 2;
+      var TY = cy + padT + (CELL_H - padT - padB - b.h * sk) / 2 + b.h * sk;
+      out.push('<g transform="translate(' + G.round(TX, 2) + ',' + G.round(TY, 2) + ') scale(' +
+        G.round(sk, 5) + ',' + G.round(-sk, 5) + ')">');
+      /* 轮廓(带 kerf 时与 toSVG 同口径) */
+      var loops = opts.kerf ? p.compensated(opts.kerf) : p.loops();
+      var d = loops.map(function (l) { return loopToPath(l); }).join(' ');
+      out.push('<path d="' + d + '" fill="rgba(47,107,176,.10)" fill-rule="evenodd" stroke="#1c4f88" stroke-width="0.35"/>');
+      p.pockets.forEach(function (q) {
+        var l2 = opts.kerf ? G.offsetLoop(q.loop, opts.kerf / 2) : q.loop;
+        out.push('<path d="' + loopToPath(l2) + '" fill="none" stroke="#0a7" stroke-width="0.35" stroke-dasharray="2,1.2">' +
+          '<title>pocket ' + G.round(q.depth, 2) + 'mm</title></path>');
+      });
+      /* 标注实体(与屏幕/DXF 同源) */
+      var dd = Dim2.forPart(p);
+      var ents = Dim2.entities(dd, { u: u });
+      var tb = Dim2.titleBlock(dd, {
+        u: 3.5 / sk, off: u * 4.6, w: Math.min(u * 30, (cellW - 30) / sk)
+      });
+      out = out.concat(Dim2.svgEnts(ents, {}));
+      out = out.concat(Dim2.svgEnts(tb.ents, {}));
+      out.push('</g>');
+    });
+
+    /* 总标题栏: 图纸右下角 */
+    var tw = 120, th = 34, tx = SW - 9 - tw, ty = SH - 9 - th;
+    out.push('<g>');
+    out.push('<rect x="' + tx + '" y="' + G.round(ty, 1) + '" width="' + tw + '" height="' + th +
+      '" fill="#fffdf8" stroke="#8a7e6c" stroke-width="0.7"/>');
+    var rowH = th / 4;
+    for (var ri = 1; ri < 4; ri++) {
+      out.push('<line x1="' + tx + '" y1="' + G.round(ty + ri * rowH, 1) + '" x2="' + (tx + tw) +
+        '" y2="' + G.round(ty + ri * rowH, 1) + '" stroke="#c9bda3" stroke-width="0.35"/>');
+    }
+    var t0 = parts[0].thickness;
+    var allSame = parts.every(function (p) { return Math.abs(p.thickness - t0) < 1e-9; });
+    var totalA = 0;
+    parts.forEach(function (p) { totalA += Math.abs(p.area()) * (p.qty || 1); });
+    var tbRows = [
+      ['海洋板 DIY · 榫卯 CAD', '700'],
+      ['零件 ' + parts.length + ' 件 · 板厚 ' + (allSame ? t0 : 'mixed') + ' mm', '400'],
+      ['净面积 ' + G.round(totalA / 1e6, 3) + ' m² · 材质 海洋板(船级胶合板)', '400'],
+      ['日期 ' + ds + ' · 单位 mm · 1:1', '400']
+    ];
+    tbRows.forEach(function (r, ri) {
+      out.push('<text x="' + (tx + 5) + '" y="' + G.round(ty + ri * rowH + rowH / 2 + 1.4, 1) +
+        '" font-size="' + (ri === 0 ? 5.5 : 4.6) + '" font-weight="' + r[1] + '" fill="#2a251c">' + esc(r[0]) + '</text>');
+    });
+    out.push('</g>');
+    out.push('</svg>');
+    return out.join('\n');
+  }
+
   /* ---------------- CSV 料单 ---------------- */
   function toCSV(parts, opts) {
     opts = opts || {};
@@ -346,5 +492,5 @@
   }
 
   global.Part = Part;
-  global.CAD = { toDXF: toDXF, toSVG: toSVG, toCSV: toCSV, loopToPath: loopToPath, esc: esc };
+  global.CAD = { toDXF: toDXF, toSVG: toSVG, toCSV: toCSV, toSheetSVG: toSheetSVG, loopToPath: loopToPath, esc: esc };
 })(typeof window !== 'undefined' ? window : this);

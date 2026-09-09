@@ -108,19 +108,23 @@ window.onload = function () {
       }
       var pmiss = [];
       pres.tf.forEach(function (o) {
-        var b = o.part.bbox(), found = null;
-        for (var ty = 0.3; ty <= 0.7 && !found; ty += 0.1) {
-          for (var tx = 0.3; tx <= 0.7 && !found; tx += 0.1) {
+        var b = o.part.bbox();
+        /* 工程标注(尺寸线/箭头/孔位引出, 棕色系)会画在板面中部,
+         * 单点采样可能正好落在标注线上。改为"整片候选点里存在蓝色即算画了"——
+         * 断言的本意是"这块板确实被绘制", 不是"中心一定是蓝"。 */
+        var hasBlue = false, first = null;
+        for (var ty = 0.2; ty <= 0.8 && !hasBlue; ty += 0.05) {
+          for (var tx = 0.2; tx <= 0.8 && !hasBlue; tx += 0.05) {
             var cand = { x: b.x0 + b.w * tx, y: b.y0 + b.h * ty };
             if (!G.pointInPoly(cand, G.flatten(o.part.outer, 0.5))) continue;
             if (o.part.holes.some(function (h) { return G.pointInPoly(cand, G.flatten(h, 0.5)); })) continue;
-            found = cand;
+            var sc = o.T(cand), c = px2(sc.x, sc.y);
+            if (!c || c[3] <= 0) continue;
+            if (first === null) first = { name: o.part.name, c: c };
+            if (c[2] >= c[0]) hasBlue = true;
           }
         }
-        if (!found) return;
-        var sc = o.T(found), c = px2(sc.x, sc.y);
-        // 详图用半透明蓝填充 + 蓝描边, alpha 必 >0 且偏蓝
-        if (!(c && c[3] > 0 && c[2] >= c[0])) pmiss.push(o.part.name + ':' + JSON.stringify(c));
+        if (!hasBlue && first) pmiss.push(first.name + ':' + JSON.stringify(first.c));
       });
       chk('each part drawn in its cell', pmiss.length === 0, pmiss.slice(0, 3).join(','));
 
@@ -232,7 +236,10 @@ window.onload = function () {
        * (实测 31,131,99), 所以判据不能钉死绝对亮度——只要求"绿通道占主导且远高于红"。
        * 阈值从主题常量推导: 混合后 g 至少不会低于原色 g 的 60%。 */
       var GMIN = THEME.traceLine[1] * 0.6;
-      function isGreen(c) { return c && c[1] > GMIN && c[1] > c[0] + 50 && c[1] > c[2] + 20; }
+      /* 与蓝掩膜叠加后, 抗锯齿像素的 g-b 差会随线的亚像素位置在 15~25 之间浮动
+       * (线宽 1.4px 落在像素边界上时合成结果差 1-2)。语义是"绿通道明显
+       * 占主导", 用 +15 而不是 +20, 免得换一次布局(如 header 高度)就红。 */
+      function isGreen(c) { return c && c[1] > GMIN && c[1] > c[0] + 50 && c[1] > c[2] + 15; }
       function hasGreenNear(sx, sy, rad) {
         var c0 = toCv(sx, sy);
         for (var dy = -rad; dy <= rad; dy++) {

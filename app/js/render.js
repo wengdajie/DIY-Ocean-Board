@@ -4,6 +4,7 @@
 (function (global) {
   'use strict';
   var G = global.G;
+  var Dim = global.Dim;
 
   function dpr() { return Math.min(2, global.devicePixelRatio || 1); }
   function fitCanvas(cv) {
@@ -41,6 +42,89 @@
   }
 
   /* ---------------- 2D: 排样视图 ---------------- */
+  /* 屏幕空间的水平/垂直尺寸线(带箭头+文字), 给板幅/零件做精准标注 */
+  function dimLineH(g, x1, x2, y, label, col) {
+    if (Math.abs(x2 - x1) < 24) return;
+    col = col || '#8a6a24';
+    g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x1, y); g.lineTo(x2, y); g.stroke();
+    g.fillStyle = col;
+    [[x1, 1], [x2, -1]].forEach(function (a) {
+      g.beginPath();
+      g.moveTo(a[0], y);
+      g.lineTo(a[0] + a[1] * 6, y - 2.2);
+      g.lineTo(a[0] + a[1] * 6, y + 2.2);
+      g.closePath(); g.fill();
+    });
+    var txt = String(label);
+    g.font = '600 10px "Segoe UI", sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'bottom';
+    var w = g.measureText(txt).width + 8;
+    g.fillStyle = 'rgba(247,244,236,.92)';
+    g.fillRect((x1 + x2) / 2 - w / 2, y - 12, w, 11);
+    g.fillStyle = col;
+    g.fillText(txt, (x1 + x2) / 2, y - 2);
+  }
+  function dimLineV(g, y1, y2, x, label, col) {
+    if (Math.abs(y2 - y1) < 24) return;
+    col = col || '#8a6a24';
+    g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, y1); g.lineTo(x, y2); g.stroke();
+    g.fillStyle = col;
+    [[y1, 1], [y2, -1]].forEach(function (a) {
+      g.beginPath();
+      g.moveTo(x, a[0]);
+      g.lineTo(x - 2.2, a[0] + a[1] * 6);
+      g.lineTo(x + 2.2, a[0] + a[1] * 6);
+      g.closePath(); g.fill();
+    });
+    var txt = String(label);
+    g.font = '600 10px "Segoe UI", sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    var h = g.measureText(txt).width + 8;
+    g.fillStyle = 'rgba(247,244,236,.92)';
+    g.fillRect(x - 5.5, (y1 + y2) / 2 - h / 2, 11, h);
+    g.fillStyle = col;
+    g.save();
+    g.translate(x, (y1 + y2) / 2); g.rotate(-Math.PI / 2);
+    g.fillText(txt, 0, 0);
+    g.restore();
+  }
+
+  /* 3D 用: 沿"屏幕上一条斜线"画尺寸标注(延伸线平行外推 offPx,
+   * 尺寸线平行于该边, 文字水平放在外侧)。给装配体标总体 W/D/H。 */
+  function dimEdge(g, a, b, label, offPx, col) {
+    var dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
+    if (L < 34) return;
+    col = col || '#8a6a24';
+    var nx = -dy / L * offPx, ny = dx / L * offPx;
+    var A = { x: a.x + nx, y: a.y + ny }, B = { x: b.x + nx, y: b.y + ny };
+    g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(a.x + nx * 0.15, a.y + ny * 0.15); g.lineTo(A.x, A.y);
+    g.moveTo(b.x + nx * 0.15, b.y + ny * 0.15); g.lineTo(B.x, B.y);
+    g.moveTo(A.x, A.y); g.lineTo(B.x, B.y);
+    g.stroke();
+    g.fillStyle = col;
+    var ux = dx / L, uy = dy / L;
+    [A, B].forEach(function (P, k) {
+      var sgn = k === 0 ? 1 : -1;
+      g.beginPath();
+      g.moveTo(P.x, P.y);
+      g.lineTo(P.x - ux * 6 * sgn - (-uy) * 2.2 * sgn, P.y - uy * 6 * sgn - ux * 2.2 * sgn);
+      g.lineTo(P.x - ux * 6 * sgn + (-uy) * 2.2 * sgn, P.y - uy * 6 * sgn + ux * 2.2 * sgn);
+      g.closePath(); g.fill();
+    });
+    var mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+    var txt = String(label);
+    g.font = '600 11px "Segoe UI", sans-serif';
+    var w = g.measureText(txt).width + 8;
+    g.fillStyle = 'rgba(247,244,236,.92)';
+    g.fillRect(mx - w / 2, my - 8, w, 15);
+    g.fillStyle = col; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(txt, mx, my);
+  }
+
   function drawNest(cv, result, opts) {
     opts = opts || {};
     var c = fitCanvas(cv), g = c.g;
@@ -48,9 +132,8 @@
     var sheets = result.sheets;
     if (!sheets.length) { return; }
     var SW = result.stats.sheetW, SH = result.stats.sheetH;
-    var pad = 24, gapY = 22;
+    var pad = 34, gapY = 26;
     // 竖向堆叠所有板
-    var totalH = sheets.length * SH + (sheets.length - 1) * (gapY / 1);
     var s = Math.min((c.w - pad * 2) / SW, (c.h - pad * 2) / (SH * sheets.length + gapY * (sheets.length - 1)));
     s *= (opts.zoom || 1);
     var ox = (c.w - SW * s) / 2 + (opts.panX || 0);
@@ -139,22 +222,39 @@
           }
         }
       });
-      // 板号
-      g.fillStyle = '#6b6152'; g.font = '11px "Segoe UI", sans-serif';
-      g.textAlign = 'left'; g.textBaseline = 'bottom';
-      g.fillText('板材 ' + (si + 1) + '  ' + SW + '×' + SH + 'mm  利用率 ' +
-        (sh.utilization * 100).toFixed(1) + '%', ox, y0 - 4);
+      // 板号: 改成"贴在板内左上角的标签片", 把板外的空隙让给尺寸标注
+      var labTxt = '板材 ' + (si + 1) + ' · ' + SW + '×' + SH + ' · 利用率 ' +
+        (sh.utilization * 100).toFixed(1) + '%';
+      g.font = '600 11px "Segoe UI", sans-serif';
+      var labW = g.measureText(labTxt).width + 14;
+      g.fillStyle = 'rgba(255,253,248,.9)';
+      g.strokeStyle = '#c9bda3'; g.lineWidth = 1;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(ox + 5, y0 + 5, labW, 18, 4);
+      else g.rect(ox + 5, y0 + 5, labW, 18);
+      g.fill(); g.stroke();
+      g.fillStyle = '#5a4a2e'; g.textAlign = 'left'; g.textBaseline = 'middle';
+      g.fillText(labTxt, ox + 12, y0 + 14.5);
+      /* 板幅精准标注: 宽标在板上方, 高标在板左侧(缩小到能读时才画, 免得糊) */
+      if (opts.dims !== false && SW * s > 300) {
+        dimLineH(g, ox, ox + SW * s, y0 - 12, SW + ' mm');
+        dimLineV(g, y0, y0 + SH * s, ox - 13, SH + ' mm');
+      }
       tfs.push({ ox: ox, oy: y0, scale: s, T: T });
     });
     return { scale: s, sheetTf: tfs };
   }
 
-  /* ---------------- 2D: 单零件详图 ---------------- */
+  /* ---------------- 2D: 单零件详图(工程图纸风格) ----------------
+   * 每格 = 一张"小图纸": 轮廓 + 总体尺寸标注线(延伸线/箭头/数字) +
+   * 孔位中心十字与引出线 + 定深铣槽引出 + 右下角标题栏。
+   * 标注实体由 dim.js 的中性层生成, 与 SVG/DXF 导出共用同一几何。 */
   function drawParts(cv, parts, opts) {
     opts = opts || {};
     var c = fitCanvas(cv), g = c.g;
     g.clearRect(0, 0, c.w, c.h);
     if (!parts.length) return;
+    var withDims = opts.dims !== false;
     var cols = Math.ceil(Math.sqrt(parts.length * (c.w / Math.max(1, c.h)) ));
     cols = Math.max(1, Math.min(cols, parts.length));
     var rows = Math.ceil(parts.length / cols);
@@ -163,10 +263,13 @@
     parts.forEach(function (p, i) {
       var cx = (i % cols) * cw, cy = Math.floor(i / cols) * ch;
       var b = p.bbox();
-      var pad = 26;
-      var s = Math.min((cw - pad * 2) / Math.max(1, b.w), (ch - pad * 2) / Math.max(1, b.h)) * (opts.zoom || 1);
-      var ox = cx + (cw - b.w * s) / 2 - b.x0 * s;
-      var oy = cy + (ch - b.h * s) / 2 + b.y1 * s;
+      /* 留白: 顶部名字条 + 底部尺寸标注区 + 左侧高度标注区(有标注时才留) */
+      var padT = 22, padR = 20;
+      var padB = withDims ? Math.max(48, Math.min(88, ch * 0.26)) : 26;
+      var padL = withDims ? Math.max(44, Math.min(64, cw * 0.2)) : 26;
+      var s = Math.min((cw - padL - padR) / Math.max(1, b.w), (ch - padT - padB) / Math.max(1, b.h)) * (opts.zoom || 1);
+      var ox = cx + padL + (cw - padL - padR - b.w * s) / 2 - b.x0 * s;
+      var oy = cy + padT + (ch - padT - padB - b.h * s) / 2 + b.y1 * s;
       var T = function (q) { return { x: ox + q.x * s, y: oy - q.y * s }; };
       g.beginPath();
       pathLoop(g, p.outer, T);
@@ -183,28 +286,55 @@
           g.beginPath(); pathLoop(g, pk.loop, T); g.fill(); g.stroke();
         });
         g.restore();
-        g.fillStyle = '#237053'; g.font = '10px "Segoe UI", sans-serif';
-        g.textAlign = 'center'; g.textBaseline = 'middle';
-        p.pockets.forEach(function (pk) {
-          var pb = G.loopBBox(pk.loop);
-          var mid = T({ x: (pb.x0 + pb.x1) / 2, y: (pb.y0 + pb.y1) / 2 });
-          if ((pb.x1 - pb.x0) * s > 30) g.fillText('▽' + G.round(pk.depth, 1), mid.x, mid.y);
-        });
       }
-      // 名称与尺寸
+      /* ---- 工程标注(dim.js 中性实体, 屏幕字高恒定 11px) ---- */
+      if (withDims && Dim && s > 0) {
+        var u = 11 / s;
+        var dd = Dim.forPart(p);
+        Dim.drawEnts(g, T, Dim.entities(dd, { u: u }), {});
+        /* 铣槽深度文字(原有行为, 保留) */
+        if (p.pockets.length) {
+          g.fillStyle = '#237053'; g.font = '10px "Segoe UI", sans-serif';
+          g.textAlign = 'center'; g.textBaseline = 'middle';
+          p.pockets.forEach(function (pk) {
+            var pb = G.loopBBox(pk.loop);
+            var mid = T({ x: (pb.x0 + pb.x1) / 2, y: (pb.y0 + pb.y1) / 2 });
+            if ((pb.x1 - pb.x0) * s > 30) g.fillText('▽' + G.round(pk.depth, 1), mid.x, mid.y);
+          });
+        }
+      }
+      // 名称(图纸页眉)
       g.fillStyle = '#1f1b15'; g.font = '600 12px "Segoe UI", sans-serif';
       g.textAlign = 'center'; g.textBaseline = 'top';
       g.fillText(p.name + (p.qty > 1 ? ' ×' + p.qty : ''), cx + cw / 2, cy + 6);
-      g.fillStyle = '#6b6152'; g.font = '11px "Segoe UI", sans-serif';
-      g.textBaseline = 'bottom';
+      // 图框: 外框 + 右下角标题栏(屏幕空间, 不随零件缩放)
+      g.strokeStyle = '#c9bda3'; g.lineWidth = 1;
+      g.strokeRect(cx + 3.5, cy + 3.5, cw - 7, ch - 7);
       var GN = { long: '横纹', cross: '竖纹' };
-      g.fillText(Math.round(b.w) + ' × ' + Math.round(b.h) + ' × ' + p.thickness + 'mm' +
-        (p.holes.length ? '   孔 ' + p.holes.length : '') +
-        (p.pockets.length ? '   铣槽 ' + p.pockets.length : '') +
-        (GN[p.meta.grain] ? '   ' + GN[p.meta.grain] : ''), cx + cw / 2, cy + ch - 6);
-      // 网格分隔
-      g.strokeStyle = '#ddd3bf'; g.lineWidth = 1;
-      g.strokeRect(cx + .5, cy + .5, cw - 1, ch - 1);
+      var rows3 = [
+        [Math.round(b.w) + ' × ' + Math.round(b.h) + ' × ' + p.thickness + ' mm', true],
+        [(GN[p.meta.grain] ? GN[p.meta.grain] + ' · ' : '') +
+          (p.holes.length ? '孔 ' + p.holes.length + ' · ' : '') +
+          (p.pockets.length ? '铣槽 ' + p.pockets.length : '无孔槽'), false],
+        ['切割周长 ' + Math.round(p.cutLength() / 10) / 100 + ' m', false]
+      ];
+      var tbW = Math.min(cw * 0.72, 218), rowH = 14, tbH = rowH * rows3.length + 4;
+      var tx1 = cx + cw - 7, ty1 = cy + ch - 7, tx0 = tx1 - tbW, ty0 = ty1 - tbH;
+      g.fillStyle = 'rgba(255,253,248,.92)';
+      g.fillRect(tx0, ty0, tbW, tbH);
+      g.strokeStyle = '#8a7e6c';
+      g.strokeRect(tx0 + .5, ty0 + .5, tbW - 1, tbH - 1);
+      g.beginPath();
+      for (var ri = 1; ri < rows3.length; ri++) {
+        g.moveTo(tx0, ty0 + ri * rowH + .5); g.lineTo(tx1, ty0 + ri * rowH + .5);
+      }
+      g.stroke();
+      g.textAlign = 'left'; g.textBaseline = 'middle';
+      rows3.forEach(function (r, ri) {
+        g.fillStyle = ri === 0 ? '#1f1b15' : '#6b6152';
+        g.font = (r[1] ? '600 11px' : '10px') + ' "Segoe UI", sans-serif';
+        g.fillText(r[0], tx0 + 8, ty0 + ri * rowH + rowH / 2 + 2);
+      });
       tfs.push({ part: p, scale: s, T: T });
     });
     return { tf: tfs, cols: cols, rows: rows };
@@ -483,8 +613,8 @@
     var oy = (c.h - bb.h * s) / 2 - bb.y0 * s + (opts.panY || 0);
     var T = function (v) { var q = D3.project(v, cm); return { x: ox + q.x * s, y: oy + q.y * s }; };
 
-    /* 地面阴影: 给一个"落在地上"的暗影, 立体感立刻就出来了。
-     * 只在没爆炸且确实俯视时画(仰视看不到地面)。 */
+    /* 地面: 网格 + 柔和投影。网格给"这东西放在多大的地面上"一个尺度感,
+     * 比纯色阴影更能传达立体。只在没爆炸且确实俯视时画(仰视看不到地面)。 */
     if (opts.ground !== false && !ex && tilt > 0.12) {
       var gz = Infinity, gx0 = Infinity, gx1 = -Infinity, gy0 = Infinity, gy1 = -Infinity;
       boxes.forEach(function (bx) {
@@ -492,6 +622,7 @@
         gx0 = Math.min(gx0, bx.pos.x); gx1 = Math.max(gx1, bx.pos.x + bx.size.x);
         gy0 = Math.min(gy0, bx.pos.y); gy1 = Math.max(gy1, bx.pos.y + bx.size.y);
       });
+      /* 1) 柔和投影(比原来略收紧) */
       var sh = 0.05 * Math.max(gx1 - gx0, gy1 - gy0);
       var quad = [
         T({ x: gx0 - sh, y: gy0 - sh, z: gz }), T({ x: gx1 + sh, y: gy0 - sh, z: gz }),
@@ -503,15 +634,39 @@
       g.closePath();
       g.fillStyle = 'rgba(120,100,70,.11)';
       g.fill();
+      /* 2) 地面网格: 步长取"好看的整数"(100/200/500), 总数不超过 ~24 条 */
+      var span = Math.max(gx1 - gx0, gy1 - gy0);
+      var step = [50, 100, 200, 250, 500, 1000].filter(function (v) {
+        return span / v <= 24;
+      })[0] || 1000;
+      g.strokeStyle = 'rgba(120,100,70,.16)'; g.lineWidth = 1;
+      g.beginPath();
+      for (var gx = Math.ceil((gx0 - sh) / step) * step; gx <= gx1 + sh; gx += step) {
+        var p1 = T({ x: gx, y: gy0 - sh, z: gz }), p2 = T({ x: gx, y: gy1 + sh, z: gz });
+        g.moveTo(p1.x, p1.y); g.lineTo(p2.x, p2.y);
+      }
+      for (var gyy = Math.ceil((gy0 - sh) / step) * step; gyy <= gy1 + sh; gyy += step) {
+        var p3 = T({ x: gx0 - sh, y: gyy, z: gz }), p4 = T({ x: gx1 + sh, y: gyy, z: gz });
+        g.moveTo(p3.x, p3.y); g.lineTo(p4.x, p4.y);
+      }
+      g.stroke();
     }
 
     /* 方向光(世界坐标) + 环境光。用面法向点乘光向算明暗, 所以转视角时
-     * 同一物理面的亮度会跟着变 —— 这才是立体感的来源。 */
+     * 同一物理面的亮度会跟着变 —— 这才是立体感的来源。
+     * 补光(FILL): 从主光对侧打回来的弱光, 把背光面从"死黑"里捞出来,
+     * 海洋板家具大量平行板面, 没有补光时整片侧板会糊成一团。 */
     var LIGHT = (function () {
       var l = opts.light || { x: -0.42, y: -0.62, z: 0.66 };
       var m = Math.sqrt(l.x * l.x + l.y * l.y + l.z * l.z) || 1;
       return { x: l.x / m, y: l.y / m, z: l.z / m };
     })();
+    var FILL = (function () {
+      var f = { x: 0.5, y: 0.55, z: 0.3 };
+      var m = Math.sqrt(f.x * f.x + f.y * f.y + f.z * f.z) || 1;
+      return { x: f.x / m, y: f.y / m, z: f.z / m };
+    })();
+    var FILL_K = opts.fillLight === undefined ? 0.22 : opts.fillLight;
     var AMB = opts.ambient === undefined ? 0.5 : opts.ambient;
     var base = opts.color || [201, 161, 108];
     var selCol = opts.selColor || [214, 142, 46];
@@ -552,7 +707,10 @@
       /* 每块板一点亮度扰动, 相邻同向板才分得开(否则整柜糊成一片) */
       var jitter = 1 + ((F.idx % 5) - 2) * 0.03;
       var nd = F.n.x * LIGHT.x + F.n.y * LIGHT.y + F.n.z * LIGHT.z;
-      var shade = (AMB + (1 - AMB) * Math.max(0, nd)) * jitter;
+      var nf = F.n.x * FILL.x + F.n.y * FILL.y + F.n.z * FILL.z;
+      var shade = (AMB + (1 - AMB) * Math.max(0, nd)
+        + FILL_K * Math.max(0, nf)) * jitter;
+      shade = Math.min(1.12, shade);
       g.beginPath();
       V.poly.forEach(function (r) {
         g.moveTo(r[0].x, r[0].y);
@@ -563,14 +721,27 @@
         Math.round(G.clamp(col[1] * shade, 0, 255)) + ',' +
         Math.round(G.clamp(col[2] * shade, 0, 255)) + ')';
       if (F.evenodd) g.fill('evenodd'); else g.fill();
-      /* 只给端面描边: 侧壁太多, 全描边会糊成黑网 */
-      if (F.cap || !solid) {
-        g.strokeStyle = isSel ? 'rgba(120,70,10,.9)' : 'rgba(96,74,44,.45)';
-        g.lineWidth = isSel ? 1.5 : 0.9;
-        g.stroke();
-      }
+      /* 描边: 端面用较实的线勾出"板面"; 侧壁用很淡的线勾出轮廓
+       * (旧版完全不描侧壁, 一堆薄板挤在一起时分不出谁是谁) */
+      g.strokeStyle = isSel ? 'rgba(120,70,10,.9)' : (F.cap ? 'rgba(96,74,44,.45)' : 'rgba(96,74,44,.18)');
+      g.lineWidth = isSel ? 1.5 : (F.cap ? 0.9 : 0.6);
+      g.stroke();
       hits.push({ box: F.box, part: F.box.part, poly: V.poly, dmin: V.dmin });
     });
+
+    /* 总体尺寸标注: W/D/H 沿包围盒的三条可见棱。
+     * 只在未爆炸时画(爆炸后"总体"已无意义), 且要有点大小才值得标。 */
+    if (opts.dims !== false && !ex) {
+      var ab = asmBBox(boxes);
+      if (ab && (ab.w > 1 || ab.d > 1 || ab.h > 1)) {
+        var cW = T({ x: ab.x0, y: ab.y0, z: ab.z0 }), cW2 = T({ x: ab.x1, y: ab.y0, z: ab.z0 });
+        dimEdge(g, cW, cW2, 'W ' + Math.round(ab.w), 30);
+        var cD = T({ x: ab.x1, y: ab.y0, z: ab.z0 }), cD2 = T({ x: ab.x1, y: ab.y1, z: ab.z0 });
+        dimEdge(g, cD, cD2, 'D ' + Math.round(ab.d), 30);
+        var cH = T({ x: ab.x0, y: ab.y0, z: ab.z0 }), cH2 = T({ x: ab.x0, y: ab.y0, z: ab.z1 });
+        dimEdge(g, cH, cH2, 'H ' + Math.round(ab.h), -30);
+      }
+    }
 
     return {
       scale: s, ox: ox, oy: oy, cam: cm, faces: vis.length,

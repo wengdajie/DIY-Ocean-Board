@@ -1383,15 +1383,15 @@ window.onload = function () {
         A.selectModel('custom');
         A.setCmode('recipe');
         var tasks = A.exportTasks();
-        chk('导出[任务表]: 6 个导出项', tasks.length === 6, tasks.map(function (t) { return t.key; }).join(','));
+        chk('导出[任务表]: 7 个导出项', tasks.length === 7, tasks.map(function (t) { return t.key; }).join(','));
         /* 后缀必须对 —— 名字里的后缀既决定了另存为对话框的类型过滤器,
          * 也决定了写进文件夹后 CAM 软件能不能认出来。 */
         chk('导出[任务表]: 后缀逐个对得上',
-          tasks.map(function (t) { return (/\.([a-z]+)$/.exec(t.name()) || [])[1]; }).join(',') === 'dxf,dxf,svg,csv,csv,json',
+          tasks.map(function (t) { return (/\.([a-z]+)$/.exec(t.name()) || [])[1]; }).join(',') === 'dxf,dxf,svg,svg,csv,csv,json',
           tasks.map(function (t) { return t.name(); }).join(' | '));
         chk('导出[任务表]: 文件名带时间戳(不会互相覆盖)',
           tasks.every(function (t) { return /-\d{8}-\d{4}\./.test(t.name()); }), tasks[0].name());
-        chk('导出[任务表]: 有零件时 6 项全部可导',
+        chk('导出[任务表]: 有零件时 7 项全部可导',
           tasks.every(function (t) { return t.ready() === ''; }),
           tasks.map(function (t) { return t.key + '=' + (t.ready() || 'OK'); }).join(' | '));
         chk('导出[任务表]: 每项真能算出非空内容',
@@ -1470,8 +1470,8 @@ window.onload = function () {
           A.EXP.dir = null; A.EXP.dirName = '';
           A.syncExpPath();
           return A.exportAll().then(function (out) {
-            chk('导出[全部]: 没选文件夹时直走下载(不连弹 6 次另存为)',
-              picked === 0 && out.length === 6 && out.every(function (r) { return r.how === 'download'; }),
+            chk('导出[全部]: 没选文件夹时直走下载(不连弹 7 次另存为)',
+              picked === 0 && out.length === 7 && out.every(function (r) { return r.how === 'download'; }),
               'picked=' + picked + ' ' + out.map(function (r) { return r.how; }).join(','));
             chk('导出[全部]: 汇总文案说明落在默认目录',
               /默认下载目录/.test(D.getElementById('msgs').textContent),
@@ -1502,14 +1502,14 @@ window.onload = function () {
           chk('导出[文件夹]: “每次问”自动置灰', D.getElementById('askSave').disabled);
           chk('导出[文件夹]: “清除”可点了', !D.getElementById('btnClearDir').disabled);
           return A.exportAll().then(function (out) {
-            chk('导出[全部]: 6 个全写进文件夹',
-              out.length === 6 && out.every(function (r) { return r.how === 'dir'; }),
+            chk('导出[全部]: 7 个全写进文件夹',
+              out.length === 7 && out.every(function (r) { return r.how === 'dir'; }),
               out.map(function (r) { return r.how; }).join(','));
-            chk('导出[全部]: 文件夹里真的落了 6 个非空文件',
-              Object.keys(files).length === 6 && Object.keys(files).every(function (k) { return files[k] > 0; }),
+            chk('导出[全部]: 文件夹里真的落了 7 个非空文件',
+              Object.keys(files).length === 7 && Object.keys(files).every(function (k) { return files[k] > 0; }),
               JSON.stringify(files));
             chk('导出[全部]: 汇总消息报出成功个数 + 落点',
-              /6/.test(D.getElementById('msgs').textContent) && /OutDir/.test(D.getElementById('msgs').textContent),
+              /7/.test(D.getElementById('msgs').textContent) && /OutDir/.test(D.getElementById('msgs').textContent),
               D.getElementById('msgs').textContent.slice(0, 80));
           });
         }).then(function () {
@@ -1557,10 +1557,10 @@ window.onload = function () {
             JSON.stringify(whys));
           /* 参数 JSON 则应该仍能导 —— 用户可能就想存一份现场参数去问人 */
           chk('导出[零零件]: 参数 JSON 仍可导且带自定义数据',
-            whys.json === '' && /"custom"/.test(tk[5].text()), whys.json + ' / ' + tk[5].text().length);
+            whys.json === '' && /"custom"/.test(tk[6].text()), whys.json + ' / ' + tk[6].text().length);
           return A.exportAll().then(function (out) {
             chk('导出[零零件]: 全部导出只落 JSON, 其余跳过',
-              out.filter(function (r) { return r.how === 'skip'; }).length === 5 &&
+              out.filter(function (r) { return r.how === 'skip'; }).length === 6 &&
               out.filter(function (r) { return r.how === 'download'; }).length === 1,
               out.map(function (r) { return r.how; }).join(','));
             A.state.panels = keep;

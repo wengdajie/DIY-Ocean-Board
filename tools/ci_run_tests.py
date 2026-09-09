@@ -34,6 +34,7 @@ BASE = os.environ.get('BASE') or 'http://127.0.0.1:8123'
 # \u65ad\u8a00\u6570\u7a81\u7136\u53d8\u5c11\u51e0\u4e4e\u603b\u662f"\u4e2d\u9014\u629b\u5f02\u5e38\u4e86"\u800c\u4e0d\u662f"\u6211\u771f\u60f3\u5220\u6d4b\u8bd5"\u3002
 BASELINE = {
     'test-geom.html': 41,
+    'test-dim.html': 37,
     'test-joints.html': 167,
     'test-models.html': 85,
     'test-nest.html': 72,
@@ -49,12 +50,21 @@ TOTAL_MIN = sum(BASELINE.values())
 
 
 def run(url, budget=300000):
-    p = subprocess.run([
-        CHROME, '--headless=new', '--disable-gpu', '--no-sandbox',
-        '--disable-dev-shm-usage', '--hide-scrollbars', '--window-size=1600,1000',
-        '--virtual-time-budget=%d' % budget, '--dump-dom', url
-    ], capture_output=True, timeout=600)
-    return p.stdout.decode('utf-8', 'replace')
+    import tempfile, shutil
+    # Windows 本地跑时, 用户常开着自己的 Chrome, 默认 profile 被锁,
+    # headless 进程会一直挂在启动上(实测 --version 都能超时)。
+    # 给每个 run 一个独立临时 profile, 用完即删; CI 里同样安全。
+    tmp = tempfile.mkdtemp(prefix='ob-chrome-')
+    try:
+        p = subprocess.run([
+            CHROME, '--headless=new', '--disable-gpu', '--no-sandbox',
+            '--disable-dev-shm-usage', '--hide-scrollbars', '--window-size=1600,1000',
+            '--user-data-dir=' + tmp, '--no-first-run', '--no-default-browser-check',
+            '--virtual-time-budget=%d' % budget, '--dump-dom', url
+        ], capture_output=True, timeout=1500)
+        return p.stdout.decode('utf-8', 'replace')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def chrome_info():
