@@ -169,6 +169,7 @@
       p.relief = td.d / 2;
       p.reliefType = $('reliefType').value;
       p.earLen = readEarLen();
+      p.earSide = $('earSide') ? $('earSide').value : 'in';
     } else {
       p.relief = 0; p.reliefType = 'none';
     }
@@ -1313,7 +1314,7 @@
       t.onclick = function () { showPane(t.dataset.pane); };
     });
     ['width', 'depth', 'height', 'thickness', 'fit', 'jointStyle', 'lapStyle', 'dovetailAngle', 'fingerW',
-      'machine', 'toolDia', 'earLen', 'reliefType', 'kerf', 'sheetSize', 'margin', 'gap', 'nestStrategy',
+      'machine', 'toolDia', 'earLen', 'earSide', 'reliefType', 'kerf', 'sheetSize', 'margin', 'gap', 'nestStrategy',
       'realThickness', 'respectGrain', 'matDensity', 'matDensityCustom', 'sheetPrice'].concat(JSX_FIELDS).forEach(function (id) {
         var el = $(id);
         if (el) el.addEventListener('change', function () { syncVis(); generate(); });
@@ -1563,7 +1564,7 @@
 
   /* ---------- 结构配方: 分类筛选 + 下拉渲染 ----------
    *
-   * 家具类型并入配方后一共 16 种, 平铺在一个 <select> 里很难找。
+   * 家具类型并入配方后一共 28 种, 平铺在一个 <select> 里很难找。
    * 所以：上面一排分类 chip（全部/家具/柜架/...）, 下面下拉按分类分组。
    * 分类名单一律从 Custom.recipeGroups() 拿, 不在这里再写一份硬编码。 */
   function buildRecipeGroupChips() {
@@ -1772,6 +1773,8 @@
         'mm。3.175mm（1/8"）与 6.35mm（1/4"）是最常见的两支平底铣刀。';
       h.className = 'hint';
     }
+    /* 换刀径 -> 小耳朵直径与过切量都变了, 读数必须跟着走 */
+    syncReliefNote();
   }
 
   /* 接合方式下拉框: **从 J.STYLES 动态渲染**。
@@ -1850,6 +1853,33 @@
     h.style.display = (st && st.hint) ? '' : 'none';
   }
 
+  /* 让位读数: 把"小耳朵到底多大、从料里多挖多少"直接算出来写给人看。
+   * 【为什么要读数】参考加工图给的是"阴角为圆心、直径 = 刀径";
+   * 而最小过切(dogbone45)把圆心沿角分线挪开一个刀半径 —— 两者**直径一样**,
+   * 过切深度却差 3.4 倍(φ6 刀: 3.00mm 对 0.88mm), 只列个选项名字说不清这笔账。 */
+  function syncReliefNote() {
+    var el = $('earNote');
+    if (!el) return;
+    if ($('machine').value !== 'cnc') { el.style.display = 'none'; return; }
+    var ty = $('reliefType').value;
+    var d = readToolDia().d, r = d / 2, txt;
+    if (ty === 'dogbone') {
+      txt = '小耳朵直径 = 刀具直径 <b>Ø' + G.round(d, 3) + '</b>（r = ' + G.round(r, 2) +
+        'mm）；圆心在阴角，直角处过切深度 = r ≈ <b>' + G.round(r, 2) + 'mm</b>';
+    } else if (ty === 'dogbone45') {
+      txt = '小耳朵直径 = 刀具直径 <b>Ø' + G.round(d, 3) + '</b>（r = ' + G.round(r, 2) +
+        'mm）；圆心沿角分线离尖点 r，直角处过切深度 ≈ 0.29r = <b>' + G.round(r * (1 - Math.SQRT1_2), 2) +
+        'mm</b>，比"圆心在阴角"省 3.4 倍料';
+    } else if (ty === 'tbone') {
+      txt = '矩形耳槽：宽 = r = <b>' + G.round(r, 2) + 'mm</b>，长 = <b>' +
+        G.round(readEarLen() * r, 2) + 'mm</b>（耳长必须 ≥ 2r，否则刀心够不到角上）';
+    } else {
+      txt = '未开让位：圆刀切不出方内角，配对的方榫会顶在角上的残料上。';
+    }
+    el.innerHTML = txt;
+    el.style.display = '';
+  }
+
   function syncVis() {
     syncThickness();
     var cnc = $('machine').value === 'cnc';
@@ -1861,7 +1891,14 @@
     var isTb = cnc && $('reliefType').value === 'tbone';
     $('earRow').style.display = isTb ? '' : 'none';
     $('earHint').style.display = isTb ? '' : 'none';
+    var esr = $('earSideRow');
+    if (esr) esr.style.display = isTb ? '' : 'none';
+    syncReliefNote();
     if (cnc) syncTool();
+    /* 激光 vs 海洋板: 酚醛胶(WBP)不汽化, 激光会碳化/切不透 -> 选激光时挂一条警告。
+     * 这条不是装饰, 是"默认值不该把人带沟里"的兜底: 默认就是激光, 必须当场说清。 */
+    var lw = $('laserWarn');
+    if (lw) lw.style.display = cnc ? 'none' : '';
     syncStyle();
     syncLap();
 
@@ -2278,6 +2315,24 @@
     window.addEventListener('resize', function () { applyLayout(false); });
   }
 
+  /* ---------- 头部"工艺手册"按钮 ----------
+   * 两个按钮指向侧栏里的折叠知识卡（海洋板加工须知 / 榫卯强度参考）。
+   * 细节: details 收起时 scrollIntoView 仍能定位, 但用户会看到一张"点完没反应"
+   * 的卡 → 必须先 open=true 再滚; 把焦点放到 summary 上, 键盘用户接着就能
+   * 用 Enter 收起, 不用再 Tab 一遍整个侧栏。 */
+  function bindCraftCards() {
+    [['btnCraft', 'craftCard'], ['btnJointRef', 'jointRefCard']].forEach(function (p) {
+      var b = $(p[0]), c = $(p[1]);
+      if (!b || !c) return;
+      b.addEventListener('click', function () {
+        c.open = true;
+        c.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        var sm = c.querySelector('summary');
+        if (sm) sm.focus({ preventScroll: true });
+      });
+    });
+  }
+
   /* ---------- init ---------- */
   /* 两个下拉框必须在 bindUI/readParams 之前建好 ——
    * HTML 里它们是空的 <select>, 空选框的 .value 是 '' ,
@@ -2292,6 +2347,7 @@
   buildRecipeFields();
   syncRecipeHint(false);
   bindExports();
+  bindCraftCards();
   Editor.init({
     state: state,
     changed: function () { generate(); },

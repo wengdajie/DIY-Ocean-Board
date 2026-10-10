@@ -34,6 +34,7 @@
     var fit = num(p.fit, 0.2);
     var relief = num(p.relief, 0), rtype = p.reliefType || 'none';
     var ropts = (p && p.earLen !== undefined) ? { earLen: num(p.earLen, 2) } : {};
+    if (p && p.earSide === 'out') ropts.earSide = 'out';
     var simplify = num(p.simplify, 1.2);
 
     // 1) 二值化 + 去噪

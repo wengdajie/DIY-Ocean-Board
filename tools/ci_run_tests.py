@@ -4,12 +4,13 @@
 \u8bbe\u8ba1\u8981\u70b9(\u90fd\u662f\u8e29\u8fc7\u7684\u5751):
   1. **\u4e0d\u80fd\u53ea\u770b"FAILS 0"** \u2014\u2014 \u5957\u4ef6\u8dd1\u5d29\u4e86\u6839\u672c\u4e0d\u4f1a\u5199\u51fa TOTAL \u884c,
      \u4e8e\u662f "\u6ca1\u6709 FAIL \u5b57\u6837" \u4f1a\u88ab\u8bef\u5f53\u6210\u901a\u8fc7\u3002\u6240\u4ee5\u8fd9\u91cc\u540c\u65f6\u5361:
-       - \u5957\u4ef6\u6570\u91cf\u5fc5\u987b = 11
+       - \u5957\u4ef6\u6570\u91cf\u5fc5\u987b = 12
        - \u6bcf\u4e2a\u5957\u4ef6\u7684\u65ad\u8a00\u6570\u5fc5\u987b >= \u57fa\u7ebf(\u9632\u6b62"\u53ea\u8dd1\u4e86\u524d\u4e09\u6761\u5c31\u629b\u5f02\u5e38"\u4e5f\u7b97\u7ee7)
        - \u603b\u6570\u5fc5\u987b >= TOTAL_MIN
-  2. \u603b\u63a7\u9875\u662f\u7528 iframe \u5e76\u884c\u8dd1 11 \u4e2a\u5957\u4ef6\u7684, \u5b8c\u6210\u540e\u624d\u628a document.title
+  2. \u603b\u63a7\u9875\u662f\u7528 iframe \u5e76\u884c\u8dd1 12 \u4e2a\u5957\u4ef6\u7684, \u5b8c\u6210\u540e\u624d\u628a document.title
      \u6539\u6210 "ALL PASS" / "FAIL n"\u3002\u62ff title \u5f53\u5b8c\u6210\u4fe1\u53f7\u6bd4\u778e\u7b49\u56fa\u5b9a\u79d2\u6570\u53ef\u9760\u3002
-  3. --virtual-time-budget \u5fc5\u987b\u7ed9\u8db3(\u5168\u5957 ~40s, \u7ed9 300s \u5bbd\u677e\u533a\u95f4)\u3002
+  3. --virtual-time-budget \u5fc5\u987b\u7ed9\u8db3: \u5957\u4ef6\u7d2f\u4e86\u4e4b\u540e\u5168\u5957
+     实测已经是分钟级(22 配方 + e2e 520 条), 不是当初的 ~40s; 给 300s 宽松区间。
 """
 import io, os, re, subprocess, sys
 
@@ -40,10 +41,10 @@ BASELINE = {
     'test-nest.html': 72,
     'test-mate.html': 52,
     'test-trace.html': 66,
-    'test-relief.html': 143,
+    'test-relief.html': 191,
     'test-image.html': 87,
-    'test-custom.html': 499,
-    'test-e2e.html': 490,
+    'test-custom.html': 633,
+    'test-e2e.html': 544,
     'test-visual.html': 150,
 }
 TOTAL_MIN = sum(BASELINE.values())
@@ -54,6 +55,10 @@ def run(url, budget=300000):
     # Windows 本地跑时, 用户常开着自己的 Chrome, 默认 profile 被锁,
     # headless 进程会一直挂在启动上(实测 --version 都能超时)。
     # 给每个 run 一个独立临时 profile, 用完即删; CI 里同样安全。
+    #
+    # 真实超时给到 2700s: 配方从 16 个涨到 22 个后, 全参数扫描 3168 -> 4356 组,
+    # 慢机器上 1500s 会被打穿(实测出现过一次 25 分钟超时)。超时的代价特别隐蔽 ——
+    # subprocess.TimeoutExpired 会以 traceback 形式结束, 连一行套件结果都拿不到。
     tmp = tempfile.mkdtemp(prefix='ob-chrome-')
     try:
         p = subprocess.run([
@@ -61,7 +66,7 @@ def run(url, budget=300000):
             '--disable-dev-shm-usage', '--hide-scrollbars', '--window-size=1600,1000',
             '--user-data-dir=' + tmp, '--no-first-run', '--no-default-browser-check',
             '--virtual-time-budget=%d' % budget, '--dump-dom', url
-        ], capture_output=True, timeout=1500)
+        ], capture_output=True, timeout=2700)
         return p.stdout.decode('utf-8', 'replace')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

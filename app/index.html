@@ -3,27 +3,45 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f3efe7">
 <title>海洋板 DIY · 榫卯 CAD 图纸生成器</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
 <header>
-  <h1>海洋板 DIY · 榫卯 CAD 生成器</h1>
-  <span class="tag" id="verTag">离线可用</span>
+  <!-- 品牌块：主标题 + 副标题，替代原来的一行 h1 -->
+  <div class="brand">
+    <h1><span class="logo" aria-hidden="true"></span>海洋板 DIY<small>榫卯 CAD 生成器</small></h1>
+    <span class="sub">船用多层胶合板 · 参数化榫卯出图 · 纯前端离线可用</span>
+  </div>
   <span class="spacer"></span>
+  <!-- 分组工具条：把知识卡片锚点收进一个描边圆角壳里 -->
+  <div class="tbgrp" role="group" aria-label="工艺参考手册">
+    <button id="btnCraft" title="海洋板（船用胶合板）的刀具、切削参数、崩边与封边要点">海洋板工艺</button>
+    <button id="btnJointRef" title="11 种接合方式的相对强度、适用场景与新手选型建议">榫卯强度</button>
+  </div>
   <button id="btnLayoutReset" title="把左侧参数栈宽度、三视图高度恢复到默认">布局复位</button>
   <span class="tag" id="selfTest">自检 —</span>
+  <span class="tag" id="verTag">离线可用</span>
 </header>
 
 <main>
   <!-- ============ 参数栏 ============ -->
   <aside id="side">
-    <h2>从哪里开始</h2>
+    <!-- 锚点导航: 参数栈很长, 五个 chip 直接跳到对应分节(纯锚点, 不用 JS) -->
+    <nav id="sideNav" aria-label="参数分节导航">
+      <a href="#secStart">开始</a>
+      <a href="#secMat">板材</a>
+      <a href="#secJoint">榫卯</a>
+      <a href="#secCraft">加工</a>
+      <a href="#secExport">导出</a>
+    </nav>
+    <h2 id="secStart">从哪里开始</h2>
     <div class="chips" id="modelChips">
       <span class="chip on" data-model="custom">结构配方</span>
       <span class="chip" data-model="image">图片生成</span>
     </div>
-    <p class="hint" id="modeHint">选一种现成结构（箱体柜、书架、桌凳、酒格……共 16 种），填几个参数，榫卐全自动。
+    <p class="hint" id="modeHint">选一种现成结构（箱体柜、书架、床、沙发、工具车……共 28 种），填几个参数，榫卯全自动。
       想自己摆板就用「零件清单」或「板位表」。</p>
 
     <!-- ---------- 图片模式 ---------- -->
@@ -148,7 +166,7 @@
       <div class="row"><label title="榫卯完成后的成品外形高度">成品高 H</label><input type="number" id="height" value="720" step="10" min="80"><span class="unit">mm</span></div>
     </div>
 
-    <h2>板材</h2>
+    <h2 id="secMat">板材</h2>
     <div class="row"><label>板厚 t</label>
       <input type="number" id="thickness" value="15" step="0.5" min="3" max="60"><span class="unit">mm</span>
     </div>
@@ -204,7 +222,7 @@
     </div>
     <p class="hint">净重 = Σ(净面积 × 板厚) × 密度，已在统计条与料单页实时更新；单价填了之后按<b>整张采购口径</b>估材料成本（剩料不折价）。桦木海洋板密度实测多在 650–750 kg/m³。</p>
 
-    <h2>榫卯参数</h2>
+    <h2 id="secJoint">榫卯参数</h2>
     <div class="row" id="jsRow"><label>接合方式</label>
       <select id="jointStyle"></select>
     </div>
@@ -236,13 +254,41 @@
     <div class="row"><label>配合间隙</label><input type="number" id="fit" value="0.2" step="0.05" min="0" max="1"><span class="unit">mm</span></div>
     <p class="hint">激光切割建议 0.1–0.2；CNC 铣削建议 0.1–0.3。此值为<b>总</b>配合间隙（榫两侧各让 1/4，槽两侧各让 1/4）。</p>
 
-    <h2>加工补偿</h2>
+    <!-- 榫卯强度参考：把"该选哪种接合"的判断依据摆在参数旁边，
+         而不是让人凭感觉选完再发现装不上/不牢。 -->
+    <details class="card" id="jointRefCard">
+      <summary>榫卯接合强度参考 · 怎么选</summary>
+      <div class="cardBody">
+        <p>以传统方榫（榫头 + 榫眼）为 <b>100</b> 的相对强度：</p>
+        <div class="strength">
+          <div class="srow"><span class="sname">通燕尾榫</span><span class="strack"><i style="width:100%"></i></span><span class="snum">105–110</span></div>
+          <div class="srow"><span class="sname">通方榫</span><span class="strack"><i style="width:95%"></i></span><span class="snum">100</span></div>
+          <div class="srow"><span class="sname">盲方榫</span><span class="strack"><i style="width:86%"></i></span><span class="snum">90–95</span></div>
+          <div class="srow"><span class="sname">指接（直榫）</span><span class="strack"><i style="width:65%"></i></span><span class="snum">65–75</span></div>
+          <div class="srow"><span class="sname">半槽搭接</span><span class="strack"><i style="width:60%"></i></span><span class="snum">60–70</span></div>
+          <div class="srow"><span class="sname">饼干榫 #20</span><span class="strack"><i style="width:36%"></i></span><span class="snum">35–40</span></div>
+          <div class="srow"><span class="sname">斜接 + 胶</span><span class="strack"><i style="width:18%"></i></span><span class="snum">15–20</span></div>
+        </div>
+        <ul>
+          <li><b>指接 ≈ 半槽搭接</b>（65–75 对 60–70），属同一量级，别断言谁一定更强。两者都是板式家具性价比最高的做法，也是本工具默认出图的方式。</li>
+          <li><b>饼干榫 / 木销不是结构榫</b>：本质是「定位销 + 胶补强」，拼板对位很好用，但拿去做椅腿、桌腿这类承重结构，几个月就会松。</li>
+          <li><b>燕尾榫</b>靠梯形自锁抗拉，只适合共面拼板与抽屉侧板。90° 角接在平板直刀下几何上做不出来 —— 本工具会说明原因并自动降级，不会默默出一张装不上的图。</li>
+          <li><b>齿数强制取奇数</b>：一对配对件用 phase 0/1 互补咬合，花纹才左右对称。</li>
+          <li>参考角度：软木燕尾 1:6 ≈ 9.5°，硬木 1:8 ≈ 7.1°，日式箱组接 1:4 ≈ 14°（本工具默认 11°）。</li>
+        </ul>
+        <p class="cardNote"><b>Fine Woodworking</b>（2009 #203）实测破坏载荷：传统方榫 ≈ 1444 lb、浮动榫片（5 mm）≈ 597 lb、饼干榫 ≈ 545 lb —— 与上面这张表的顺序一致。</p>
+      </div>
+    </details>
+
+    <h2 id="secCraft">加工补偿</h2>
     <div class="row"><label>切割方式</label>
       <select id="machine">
         <option value="laser" selected>激光（无需让位）</option>
-        <option value="cnc">CNC 铣削（需让位）</option>
+        <option value="cnc">CNC 铣削（需让位）· 推荐</option>
       </select>
     </div>
+    <!-- 与切割方式联动：选激光时提醒海洋板的胶线问题（syncVis 控制显隐） -->
+    <p class="hint warnHint" id="laserWarn">海洋板用<b>酚醛胶（WBP）</b>，激光遇上胶线会碳化、发黑且常常切不透，气味刺鼻还会腐蚀镜片。<b>建议改用 CNC 铣削</b>；若一定要用激光，请换室内级脲醛胶板材。</p>
     <div class="row" id="toolRow" style="display:none"><label>刀具直径</label><input type="number" id="toolDia" value="3.175" step="0.1" min="0.3" max="25"><span class="unit">mm</span></div>
     <div class="row tRow" id="toolChipRow" style="display:none"><label>常用刀径</label>
       <span id="toolChips">
@@ -254,15 +300,92 @@
     <p class="hint" id="toolHint" style="display:none">3.175mm（1/8"）与 6.35mm（1/4"）是最常见的两支平底铣刀。让位量按<b>刀半径</b>算，填多少都行（0.3～25mm）。</p>
     <div class="row" id="reliefRow" style="display:none"><label>内角让位</label>
       <select id="reliefType">
-        <option value="dogbone" selected>圆心在阴角（参考图小耳朵）</option>
+        <option value="dogbone45" selected>圆心沿角分线（最小过切 · 推荐）</option>
+        <option value="dogbone">圆心在阴角（参考图小耳朵）</option>
         <option value="tbone">T-bone 单边让位</option>
         <option value="none">不让位</option>
       </select>
     </div>
+    <!-- 让位读数：直径 / 过切深度随刀径实时算（syncReliefNote） -->
+    <p class="hint" id="earNote" style="display:none"></p>
     <div class="row" id="earRow" style="display:none"><label>耳槽长度</label><input type="number" id="earLen" value="2" step="0.25" min="1" max="4"><span class="unit">×r</span></div>
+    <div class="row" id="earSideRow" style="display:none"><label>T-bone 耳槽朝向</label>
+      <select id="earSide">
+        <option value="in" selected>沿入边（逆轮廓）</option>
+        <option value="out">沿出边（顺轮廓）</option>
+      </select>
+    </div>
     <p class="hint" id="earHint" style="display:none">T-bone 的耳槽必须沿边挖到 <b>2 倍刀半径</b>，刀心才够得着内角 —— 只挖 1 倍等于没让位（实测残料只减 13%）。想更保守可加大，但会多牺牲料。</p>
+    <details class="card" id="reliefCard">
+      <summary>小耳朵开口方式 · 三种画法对比</summary>
+      <div class="cardBody">
+        <p>CNC 铣刀是圆的，切不出方内角：刀心必须离两条边各一个刀半径，于是角上必然留一块半径 r 的圆角残料，配对的方榫顶不到底。「小耳朵」就是在阴角多切一点，把那块残料挪到不影响配合的地方。三种画法的<b>直径都一样</b>（= 刀具直径），差别只在圆心放在哪。</p>
+
+        <div class="reliefDemo">
+          <svg viewBox="0 0 78 58" class="rdFig" aria-hidden="true">
+            <rect x="1" y="1" width="70" height="52" fill="#e6ddc9" stroke="#cfc3ad"/>
+            <rect x="41" y="1" width="16" height="26" fill="#fffdf9" stroke="#cfc3ad"/>
+            <circle cx="41" cy="27" r="6" fill="#f6e7db" stroke="#a4531f" stroke-width="0.9" stroke-dasharray="2.5 2"/>
+          </svg>
+          <div>
+            <b>① 圆心在阴角</b>（参考加工图的那种）
+            <span>小耳朵 = 完整刀圆，Ø 永远等于刀具直径；直角处过切 = 刀半径 r。<br>最好编程，但每个角都往料里多挖一个 1/4 圆。</span>
+          </div>
+        </div>
+
+        <div class="reliefDemo">
+          <svg viewBox="0 0 78 58" class="rdFig" aria-hidden="true">
+            <rect x="1" y="1" width="70" height="52" fill="#e6ddc9" stroke="#cfc3ad"/>
+            <rect x="41" y="1" width="16" height="26" fill="#fffdf9" stroke="#cfc3ad"/>
+            <circle cx="45.2" cy="22.8" r="6" fill="#f6e7db" stroke="#a4531f" stroke-width="0.9" stroke-dasharray="2.5 2"/>
+          </svg>
+          <div>
+            <b>② 圆心沿角分线</b>（最小过切）
+            <span>圆心离尖点正好一个刀半径，圆<b>仍然过尖点</b>，所以刀一样够得着；过切降到 r(1−sin(转角/2))，直角处只有 0.29r（φ6 刀 = 0.88mm），比 ① 省 3.4 倍料。<br>邻边不够长时自动退成 T-bone —— 缩小半径等于让位失效，不能拿它兜。</span>
+          </div>
+        </div>
+
+        <div class="reliefDemo">
+          <svg viewBox="0 0 78 58" class="rdFig" aria-hidden="true">
+            <rect x="1" y="1" width="70" height="52" fill="#e6ddc9" stroke="#cfc3ad"/>
+            <rect x="41" y="1" width="16" height="26" fill="#fffdf9" stroke="#cfc3ad"/>
+            <rect x="35" y="15" width="6" height="12" fill="#f6e7db" stroke="#a4531f" stroke-width="0.9" stroke-dasharray="2.5 2"/>
+          </svg>
+          <div>
+            <b>③ T-bone 单边矩形耳</b>
+            <span>沿一条边挖：宽 = r、长 = 2r（短于 2r 刀心够不到角上）。<br>只吃一条边，窄料位更耐挤；代价是开口偏向一侧，外观不如前两种对称。</span>
+          </div>
+        </div>
+
+        <p class="hint" style="padding-left:0">上面三张图按 φ6 铣刀画的（r = 3mm、刀圆 Ø6）。换成 φ8 就自动变成 Ø8、r = 4mm —— 让位直径永远等于你填的刀具直径，不需要自己换算。</p>
+      </div>
+    </details>
     <div class="row"><label>刀缝补偿 kerf</label><input type="number" id="kerf" value="0" step="0.05" min="0"><span class="unit">mm</span></div>
     <p class="hint">kerf 为切缝总宽度，导出时轮廓将外扩 kerf/2（孔内缩），使成品达到公称尺寸。</p>
+
+    <!-- 海洋板加工须知：材料的真实切削特性，决定"用什么机器/什么刀/多少进给" -->
+    <details class="card" id="craftCard">
+      <summary>海洋板加工须知 · 船用胶合板</summary>
+      <div class="cardBody">
+        <p><b>材料</b>：船用多层胶合板（Marine Plywood）。单板 90° 交叉叠压、芯层无空洞，酚醛树脂胶（WBP / EN 314 Class 3）耐沸水，常见厚度 4 / 6 / 9 / 12 / 15 / 18 / 25 mm，密度 550–750 kg/m³。层间无空隙、厚度公差小，正是它比普通胶合板更适合开榫的原因。</p>
+        <div class="kv">
+          <span>主轴转速</span><b>12 000–18 000 rpm</b>
+          <span>进给速度</span><b>3 000–6 000 mm/min</b>
+          <span>单层切深</span><b>≤ 刀径的 50%</b>
+          <span>下刀速度</span><b>300–800 mm/min</b>
+        </div>
+        <ul>
+          <li><b>刀具</b>：粗加工（开料 / 切轮廓）用 2–3 刃硬质合金螺旋刀 Φ6–12；精加工用 4 刃平底 / 圆鼻刀 Φ3–6。过胶线时先降速 20–30%，因为酚醛胶比木纤维更硬。</li>
+          <li><b>崩边（毛刺）</b>：上下同时剪切的<b>压缩刀</b>最稳，顶底两面都不易爆边；小件在板材下垫一块硬质垫板可防底面崩口；<b>顺纹走刀</b>毛刺最少，逆纹必起毛。</li>
+          <li><b>粘刀</b>：酚醛胶易把树脂糊在刀上，每 1–2 小时清一次刀，钝刀会让毛刺成倍增加。</li>
+          <li><b>固定</b>：优选真空吸附；薄板与小件加垫板，别用夹具压出变形。</li>
+          <li><b>厚板</b>：25 mm 建议分两次切，效率与切面都更好。</li>
+          <li><b>封边</b>：切开后暴露的是端面纤维，会顺毛细作用吸水 —— 户外或潮湿环境务必用双组分聚氨酯 / 环氧树脂封边。</li>
+          <li><b>配合</b>：不同刀具的实际余量差别不小，上机前先用小料试切一组榫卯，校准上面的「配合间隙」。</li>
+        </ul>
+        <p class="hint" style="padding-left:0">以上是常见机床的<b>起步值</b>，最终以试切切面（不起毛、不焦边）为准再微调。</p>
+      </div>
+    </details>
 
     <h2 id="extraHead">结构选项</h2>
     <div id="extra"></div>
@@ -271,7 +394,7 @@
       <button class="primary" id="btnGen">重新生成</button>
       <button id="btnFit">适应窗口</button>
     </div>
-    <h2>导出</h2>
+    <h2 id="secExport">导出</h2>
     <!-- 导出位置: 三档策略。
          选了文件夹 -> 直写该文件夹(能一键导全部);
          没选但勾了"每次问" -> 弹另存为对话框;

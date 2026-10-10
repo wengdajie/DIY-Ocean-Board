@@ -74,6 +74,9 @@
   function reliefOpts(p) {
     var o = {};
     if (p && p.earLen !== undefined) o.earLen = num(p.earLen, 2);
+    /* T-bone 耳槽朝哪边开。'out' = 沿出边往前挖, 默认 'in' = 沿入边往回挖。
+     * 放在 opts 里而不是 type 里: 它只对 tbone 有意义, 换让位方式时不该丢。 */
+    if (p && p.earSide === 'out') o.earSide = 'out';
     return o;
   }
 

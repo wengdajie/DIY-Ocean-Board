@@ -15,3 +15,8 @@ __pycache__/
 
 # 注意: tools/dump.json 是**入仓的** —— 它是外部交叉校验的基准快照，
 # 没它 verify_exports.py 跑不起来（而重生成它需要本地有 Chrome）。
+
+# 本机工作数据 / 参考素材 / 前后对比截图（不入仓）
+.workbuddy/
+参考/
+ui-*.png

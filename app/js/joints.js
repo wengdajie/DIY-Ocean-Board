@@ -216,9 +216,23 @@
    *     现在: 过切圆的两个落点必须都留在邻边内, 且缺口宽度必须容得下
    *     2r 的圆(否则圆会跨过缺口另一侧) —— 容不下就自动降级到 T-bone。
    *
-   * type: 'dogbone' 过切圆 | 'tbone' 矩形耳 | 'none'
+   * 【第 11 轮: 按加工图补上"最小过切"开口 + 耳槽朝向】
+   * 参考加工图（榫卯家具画小耳朵方法）给的是"阴角为圆心、直径 = 刀径"的开口。
+   * 它的过切深度 = 刀半径 r（直角内角处会往料里多挖一个 1/4 圆），
+   * 对 15mm 板 + φ6 刀就是每个角多挖 3mm —— 有时会把榫肩啃穿。
+   * 同一条圆弧其实还能往外挪：把圆心沿**阴角角分线**移到离尖点恰好 r 处，
+   * 圆还是过尖点（刀一样够得着），但过切深度降到 r*(1 - sin(turn/2))，
+   * 直角处 0.293r ≈ 0.88mm（φ6 刀），比"圆心在阴角"省 3.4 倍料。
+   * 代价是圆弧在两条邻边上占的长度从 r 变成 2r*sin(turn/2)（直角 1.414r），
+   * 邻边不够长时宁可**降级成 T-bone** —— 缩 r 会让让位半径小于刀半径，
+   * 刀照样进不去角上，等于白让。
+   *
+   * type: 'dogbone'  过切圆(圆心在阴角, 直径 = 刀具直径)
+   *     | 'dogbone45' 最小过切(圆心沿角分线离尖点 r, 圆过尖点)
+   *     | 'tbone' 矩形耳 | 'none'
    * opts: { earLen: 耳长系数(默认 2, 即 2r), minTurn: 最小转角(默认 2°),
-   *         allowShrink: 邻边不够时是否缩小 r (默认 true) }
+   *         allowShrink: 邻边不够时是否缩小 r (默认 true),
+   *         earSide: T-bone 耳槽开在哪条边 —— 'in'(默认, 入边) | 'out'(出边) }
    * 返回值带 .stats = { applied, skipped, shrunk, degraded }
    */
   function applyRelief(loop, r, type, opts) {
@@ -229,20 +243,32 @@
       return pass;
     }
     var earMul = opts.earLen === undefined ? 2 : Math.max(1, opts.earLen);
+    var earSide = opts.earSide === 'out' ? 'out' : 'in';
     var minTurn = opts.minTurn === undefined ? 2 : opts.minTurn;
     var allowShrink = opts.allowShrink !== false;
     var rMin = opts.minRadius === undefined ? 0.15 : opts.minRadius;
     var n = loop.length, i, j;
     var st = { applied: 0, skipped: 0, shrunk: 0, degraded: 0 };
 
-    /* 让位在**入边**(tbone)或**两条边**(dogbone)上都要占掉一段长度。
-     * 两个相邻内凹角若共用一条短边, 各自占一段就会**互相越过** ->
-     * 轮廓折回自己 = 自交废图。实测 6mm 宽 x 10 深缺口 + 刀 r=3.2:
-     * 两个角各要 3.2mm, 合计 6.4 > 6, 旧版直接切出自交轮廓(镂 74mm2)。
-     * 所以必须把"每条边的长度"当作**两端共享的预算**统一分配。
-     * 系数: tbone 只吃入边(earMul 倍), dogbone 两边各吃 1 倍。 */
-    function cIn(k) { return k === 'tbone' ? earMul : 1; }
-    function cOut(k) { return k === 'tbone' ? 0 : 1; }
+    /* 让位在邻边上占掉的长度, 统一用"系数 × rr"表示。
+     * 【为什么系数必须按角算, 不能按类型取常数】
+     *   tbone    只吃一侧边, 系数恒为 earMul(默认 2)。
+     *   dogbone  圆心在阴角, 两条边各吃 1 倍(落点就在离角点 rr 处)。
+     *   dogbone45 的落点在离角点 2*rr*sin(turn/2) 处 —— 直角 1.414r、
+     *             60° 楔 1.0r、45° 楔 0.765r。取常数要么窄楔处保守浪费,
+     *             要么直角处算少了直接自交。 */
+    function kIn(v) {
+      if (!v) return 0;
+      if (v.kind === 'tbone') return earSide === 'out' ? 0 : earMul;
+      if (v.kind === 'dogbone45') return 2 * Math.sin(v.turn * G.D2R / 2);
+      return 1;
+    }
+    function kOut(v) {
+      if (!v) return 0;
+      if (v.kind === 'tbone') return earSide === 'out' ? earMul : 0;
+      if (v.kind === 'dogbone45') return 2 * Math.sin(v.turn * G.D2R / 2);
+      return 1;
+    }
 
     // ---- pass 1: 找出候选角, 记下几何量 ----
     var V = new Array(n), eLen = new Array(n);
@@ -262,12 +288,12 @@
       /* 只处理右转(材料侧内凹)。turn 只排除"几乎共线"的假角:
        * 钝内角同样卡刀, 旧版 20° 的阈值把这些角全漏掉了。 */
       if (cr >= -1e-9 || turn < minTurn) continue;
-      /* 锐内角(转角 > 100°)的 270° 过切圆必然穿出邻边 -> 自交。
+      /* 锐内角(转角 > 100°)的过切圆必然穿出邻边 -> 自交。
        * 矩形耳沿单边挖, 任何角度都安全, 所以这里直接选 tbone。 */
-      var kind = type === 'tbone' ? 'tbone' : 'dogbone';
-      if (kind === 'dogbone' && turn > 100) { kind = 'tbone'; st.degraded++; }
+      var kind = type === 'tbone' ? 'tbone' : (type === 'dogbone45' ? 'dogbone45' : 'dogbone');
+      if (kind !== 'tbone' && turn > 100) { kind = 'tbone'; st.degraded++; }
       V[i] = {
-        kind: kind, r: r, a: a, b: b, turn: turn,
+        kind: kind, r: r, rNom: r, a: a, b: b, turn: turn,
         lenIn: eLen[prev], lenOut: eLen[i], degraded: false
       };
     }
@@ -282,16 +308,16 @@
         for (i = 0; i < n; i++) {
           j = (i + 1) % n;
           var vi = V[i], vj = V[j];
-          var dem = (vi ? cOut(vi.kind) * vi.r : 0) + (vj ? cIn(vj.kind) * vj.r : 0);
+          var dem = (vi ? kOut(vi) * vi.r : 0) + (vj ? kIn(vj) * vj.r : 0);
           var budget = eLen[i] * 0.98;
           if (dem > budget + 1e-9) {
             if (!allowShrink) {
-              if (vi && cOut(vi.kind) > 0) V[i] = null;
-              if (vj && cIn(vj.kind) > 0) V[j] = null;
+              if (vi && kOut(vi) > 0) V[i] = null;
+              if (vj && kIn(vj) > 0) V[j] = null;
             } else {
               var f = budget / dem;
-              if (vi && cOut(vi.kind) > 0) { vi.r *= f; vi.shrunk = true; }
-              if (vj && cIn(vj.kind) > 0) { vj.r *= f; vj.shrunk = true; }
+              if (vi && kOut(vi) > 0) { vi.r *= f; vi.shrunk = true; }
+              if (vj && kIn(vj) > 0) { vj.r *= f; vj.shrunk = true; }
             }
             moved = true;
           }
@@ -301,7 +327,24 @@
       var deg = false;
       for (i = 0; i < n; i++) {
         var v = V[i];
-        if (!v || v.kind !== 'dogbone') continue;
+        if (!v) continue;
+        if (v.kind === 'dogbone45') {
+          /* dogbone45 的两个落点离角点 2*rr*sin(turn/2), 最长到 2rr。
+           * 邻边放不下(或与邻角的预算平分后被缩小)就退成 T-bone ——
+           * 这里**不能**靠缩 rr 兜过去: rr 一小于刀半径, 圆就不再过尖点,
+           * 刀照样进不去角上, 让位等于白做。T-bone 只吃一条边, 反而更耐挤。 */
+          var need = 2 * v.rNom * Math.sin(v.turn * G.D2R / 2);
+          if (need > Math.min(v.lenIn, v.lenOut) * 0.98 ||
+              (v.shrunk && v.r < v.rNom - 1e-9)) {
+            /* 半径要**还原**再退成 T-bone: 之前那轮预算是按 dogbone45 的大脚
+             * 印(1.414r)缩的, 换成只吃一条边的 T-bone 后同一段边放得下更长的耳,
+             * 不还原就白牺牲一截让位量(实测 6x10 缺口: 还原 1.47mm² 残料,
+             * 不还原 9.81mm²)。 */
+            v.kind = 'tbone'; v.degraded = true; v.r = v.rNom; v.shrunk = false; deg = true;
+          }
+          continue;
+        }
+        if (v.kind !== 'dogbone') continue;
         /* 过切圆要塞进内角的楔形(张开角 = 180 - turn):
          * 沿邻边最远要够到 r / sin(张开角/2)。够不到就降级。 */
         var open = (180 - v.turn) * G.D2R;
@@ -326,15 +369,36 @@
       if (vv.degraded) st.degraded++;
       var rr = vv.r;
       if (vv.kind === 'tbone') {
-        /* 矩形耳: 沿**入边**往回挖 earMul*rr, 往材料侧深 rr。
-         * 材料恒在前进方向左侧 => 入边的材料侧法向 = left(a)。
+        /* 矩形耳: 沿一条邻边挖 earMul*rr, 往材料侧深 rr。
+         * 材料恒在前进方向左侧 —— 所以入边的材料侧法向 = left(a),
+         * 出边的材料侧法向 = left(b)。耳槽开哪条边由 earSide 决定。
          * 【耳长必须 >= 2rr】见函数头的栅格化取证: 刀心离入边至少 rr、
          * 离角点也至少 rr, 耳长只有 rr 时刀心根本走不到角点那条法线上。 */
-        var m = G.left(vv.a), eL = earMul * rr;
-        out.push(G.P(Ci.x - vv.a.x * eL, Ci.y - vv.a.y * eL));
-        out.push(G.P(Ci.x - vv.a.x * eL + m.x * rr, Ci.y - vv.a.y * eL + m.y * rr));
-        out.push(G.P(Ci.x + m.x * rr, Ci.y + m.y * rr));
-        out.push(G.P(Ci.x, Ci.y));
+        var eL = earMul * rr;
+        if (earSide === 'out') {
+          /* 出边: 从角点先扎进材料, 再沿出边往前 —— 与 "in" 的绕行方向一致
+           * (都是局部顺时针), 不然会把缺口本身填回去。 */
+          var mb = G.left(vv.b);
+          out.push(G.P(Ci.x, Ci.y));
+          out.push(G.P(Ci.x + mb.x * rr, Ci.y + mb.y * rr));
+          out.push(G.P(Ci.x + vv.b.x * eL + mb.x * rr, Ci.y + vv.b.y * eL + mb.y * rr));
+          out.push(G.P(Ci.x + vv.b.x * eL, Ci.y + vv.b.y * eL));
+        } else {
+          var m = G.left(vv.a);
+          out.push(G.P(Ci.x - vv.a.x * eL, Ci.y - vv.a.y * eL));
+          out.push(G.P(Ci.x - vv.a.x * eL + m.x * rr, Ci.y - vv.a.y * eL + m.y * rr));
+          out.push(G.P(Ci.x + m.x * rr, Ci.y + m.y * rr));
+          out.push(G.P(Ci.x, Ci.y));
+        }
+      } else if (vv.kind === 'dogbone45') {
+        /* 最小过切小耳朵: 圆心沿角分线离开尖点 rr, 圆恰好过尖点。
+         * 落点 = C - a*hf 与 C + b*hf (hf = 2rr*sin(turn/2)),
+         * 两者到新圆心的距离都等于 rr, 弦半角 = turn -> 扫掠 = 2*turn;
+         * turn=90 时 hf = 1.414rr、扫掠 180°(半圆), 圆心恰在 45° 对角线上。
+         * 轮廓沿顺时针大弧绕过去, 等价于"名义缺口 ∪ 过尖点的刀圆"。 */
+        var hf = 2 * rr * Math.sin(vv.turn * G.D2R / 2);
+        out.push(G.P(Ci.x - vv.a.x * hf, Ci.y - vv.a.y * hf, G.bulgeOf(-2 * vv.turn)));
+        out.push(G.P(Ci.x + vv.b.x * hf, Ci.y + vv.b.y * hf));
       } else {
         /* dogbone: 严格按参考加工图：阴角就是圆心，半径 rr = 刀具直径/2，
          * 所以完整小耳朵的直径始终等于用户输入的 CNC 刀具直径；不是把圆心

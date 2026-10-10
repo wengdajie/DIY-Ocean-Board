@@ -358,8 +358,141 @@ try {
   chk('刀 r=20mm(荒谬值): 不崩且零件仍合法', werr.length === 0, werr.slice(0, 2).join(' | '));
 })();
 
-} catch (e) { chk('EXCEPTION ' + e.message, false, e.stack); }
-var fails = L.filter(function (s) { return /^FAIL/.test(s); });
+/* ============================================================
+ * 10. 最小过切小耳朵(dogbone45) + T-bone 耳槽朝向(earSide)
+ *
+ * 参考加工图给的是"阴角为圆心、直径 = 刀径"的画法(本套件第 6 节)。它的
+ * 过切深度 = 刀半径 r —— 直角内角处往料里多挖一个 1/4 圆。同一条圆弧把
+ * 圆心沿**阴角角分线**往外挪一个刀半径, 圆仍然过尖点(刀一样够得着),
+ * 过切深度降到 r(1-sin(turn/2)): 直角 0.293r, φ6 刀即 0.88mm。
+ *
+ * 这一节盯三件事:
+ *   a) 真的让刀进去了(残料 -> 0) 且 真的比 dogbone 省料;
+ *   b) 几何对得上(半径 = r、圆心离尖点 = r、扫掠 = 2*turn);
+ *   c) 邻边不够时**退成 T-bone** 而不是缩半径 —— 半径一小于刀半径,
+ *      圆就不再过尖点, 让位等于白做。
+ * ============================================================ */
+(function () {
+  var r = 3, nom = slot(24, 16), roi = roiOf(24, 16, r);
+  var base = reach(nom, nom, roi, r).bad;
+  chk('取证: 不让位确有残料(否则本节是空跑)', base > 0.5, G.round(base, 2) + 'mm2');
+
+  var rel45 = J.applyRelief(nom, r, 'dogbone45');
+  var m45 = reach(nom, rel45, roi, r);
+  var relD = J.applyRelief(nom, r, 'dogbone');
+  var mD = reach(nom, relD, roi, r);
+  chk('dogbone45: 残料清零(方榫仍插得到底)', m45.bad < 0.05, G.round(m45.bad, 3) + 'mm2');
+  chk('dogbone45: 不自交', !si(rel45));
+  chk('dogbone45 比 dogbone 明显省料(过切深度 r -> 0.29r)', m45.sac < mD.sac * 0.5,
+    G.round(m45.sac, 2) + ' vs ' + G.round(mD.sac, 2) + 'mm2');
+
+  /* ---- 几何: 圆心离尖点 = 刀半径(圆过尖点)、半径 = 刀半径、扫掠 = 2*turn ---- */
+  [90, 60, 45].forEach(function (turn) {
+    var dep = 25, th = turn * G.D2R, halfw = dep / Math.tan(th / 2);
+    var loop = [G.P(0, 0), G.P(400, 0), G.P(400, 60),
+      G.P(200 + halfw, 60), G.P(200, 60 - dep), G.P(200 - halfw, 60), G.P(0, 60)];
+    var rel = J.applyRelief(loop, r, 'dogbone45');
+    var idx = -1;
+    for (var i = 0; i < rel.length; i++) if (rel[i].b) idx = i;
+    if (idx < 0) {
+      chk('dogbone45 V角' + turn + '°: 无弧则必须降级且不自交', !si(rel) && rel.stats.degraded > 0,
+        JSON.stringify(rel.stats));
+      return;
+    }
+    var a = G.arcFromBulge(rel[idx], rel[(idx + 1) % rel.length], rel[idx].b);
+    var C = G.P(200, 60 - dep);
+    chk('dogbone45 V角' + turn + '°: 半径 = 刀半径', near(a.r, r, 0.02), G.round(a.r, 4));
+    chk('dogbone45 V角' + turn + '°: 圆心离尖点 = 刀半径(圆恰好过尖点)',
+      near(Math.hypot(a.cx - C.x, a.cy - C.y), r, 0.02),
+      G.round(Math.hypot(a.cx - C.x, a.cy - C.y), 4));
+    chk('dogbone45 V角' + turn + '°: 扫掠 = 2×转角', near(Math.abs(a.sweep * G.R2D), 2 * turn, 0.5),
+      G.round(a.sweep * G.R2D, 2) + ' 应 ' + (-2 * turn));
+    chk('dogbone45 V角' + turn + '°: 不自交', !si(rel));
+  });
+
+  /* ---- 过切深度: 沿缺口的两条壁量"材料被挖进去多深" ----
+   * slot(24,16) 的两条壁是 x=92(y 44..60) 与 y=44(x 68..92), 材料在 x>92 / y<44。 */
+  function bite(ty) {
+    var poly = G.flatten(J.applyRelief(slot(24, 16), r, ty), 0.01), best = 0;
+    for (var i = 0; i < poly.length; i++) {
+      var p = poly[i];
+      if (p.y > 44 + 1e-6 && p.y < 60 - 1e-6) best = Math.max(best, p.x - 92);
+      if (p.x > 68 + 1e-6 && p.x < 92 - 1e-6) best = Math.max(best, 44 - p.y);
+    }
+    return best;
+  }
+  chk('dogbone 过切深度 = 刀半径 r(参考图的画法)', near(bite('dogbone'), r, 0.02), G.round(bite('dogbone'), 3));
+  chk('dogbone45 过切深度 = r(1-1/√2) ≈ 0.293r', near(bite('dogbone45'), r * (1 - Math.SQRT1_2), 0.02),
+    G.round(bite('dogbone45'), 3));
+  chk('dogbone45 的过切深度确实更小(省料结论的几何依据)', bite('dogbone45') < bite('dogbone') * 0.5,
+    G.round(bite('dogbone45'), 3) + ' vs ' + G.round(bite('dogbone'), 3));
+
+  /* ---- 邻边不够: 退成 T-bone, 不许靠缩半径糊过去 ---- */
+  [[6, 10], [4, 8]].forEach(function (c) {
+    var nm = slot(c[0], c[1]), r2 = 3.2, roi2 = roiOf(c[0], c[1], r2);
+    var rn = J.applyRelief(nm, r2, 'dogbone45');
+    chk('dogbone45 窄缺口' + c[0] + 'x' + c[1] + ': 退成 T-bone 并记 degraded', rn.stats.degraded >= 1,
+      JSON.stringify(rn.stats));
+    chk('dogbone45 窄缺口' + c[0] + 'x' + c[1] + ': 不自交', !si(rn));
+    /* 半径要还原, 否则白牺牲一截让位量 —— 退化的结果应当**不差于**直接选 T-bone */
+    chk('dogbone45 窄缺口' + c[0] + 'x' + c[1] + ': 退化后不差于直接 T-bone',
+      reach(nm, rn, roi2, r2).bad <= reach(nm, J.applyRelief(nm, r2, 'tbone'), roi2, r2).bad + 1e-9,
+      G.round(reach(nm, rn, roi2, r2).bad, 2) + ' vs ' +
+      G.round(reach(nm, J.applyRelief(nm, r2, 'tbone'), roi2, r2).bad, 2));
+  });
+
+  /* ---- 常见刀径都要能干净切出 24x16 缺口 ---- */
+  [3.175, 4, 6, 6.35, 8].forEach(function (dia) {
+    var rr = dia / 2, m = reach(nom, J.applyRelief(nom, rr, 'dogbone45'), roiOf(24, 16, rr), rr);
+    chk('dogbone45 刀径 ' + dia + 'mm: 24x16 缺口切干净', m.bad < 0.08, G.round(m.bad, 3) + 'mm2');
+  });
+
+  /* ---- T-bone 耳槽朝向: 两条边各开一次都要切干净、都不许自交 ---- */
+  ['in', 'out'].forEach(function (es) {
+    var rel = J.applyRelief(nom, r, 'tbone', { earSide: es });
+    var m = reach(nom, rel, roi, r);
+    var b0 = G.loopBBox(nom), b1 = G.loopBBox(rel);
+    chk('tbone earSide=' + es + ': 残料清零', m.bad < 0.05, G.round(m.bad, 3));
+    chk('tbone earSide=' + es + ': 不自交', !si(rel));
+    chk('tbone earSide=' + es + ': 不越出板外形',
+      b1.x0 >= b0.x0 - 1e-6 && b1.x1 <= b0.x1 + 1e-6 && b1.y0 >= b0.y0 - 1e-6 && b1.y1 <= b0.y1 + 1e-6);
+  });
+  chk('tbone 默认 = earSide in', JSON.stringify(J.applyRelief(nom, r, 'tbone')) ===
+    JSON.stringify(J.applyRelief(nom, r, 'tbone', { earSide: 'in' })));
+  chk('tbone earSide 非法值回落成 in', JSON.stringify(J.applyRelief(nom, r, 'tbone', { earSide: 'xx' })) ===
+    JSON.stringify(J.applyRelief(nom, r, 'tbone')));
+  chk('tbone 两侧开口形状不同(确实换了边)',
+    JSON.stringify(J.applyRelief(nom, r, 'tbone', { earSide: 'in' })) !==
+    JSON.stringify(J.applyRelief(nom, r, 'tbone', { earSide: 'out' })));
+
+  /* ---- 榫眼(孔, CW 环)与恒等不变量 ---- */
+  var hole = G.ensureOrient(G.rect(10, 10, 24, 12.2), false);
+  var rh = J.applyRelief(hole, 2, 'dogbone45');
+  chk('榫眼孔 dogbone45: 4 个角全让位', rh.stats.applied === 4, JSON.stringify(rh.stats));
+  chk('榫眼孔 dogbone45: 仍然是 CW(孔)', G.loopArea(rh) < 0);
+  chk('榫眼孔 dogbone45: 孔变大(让到料里去了)', Math.abs(G.loopArea(rh)) > Math.abs(G.loopArea(hole)),
+    G.round(Math.abs(G.loopArea(rh)) - Math.abs(G.loopArea(hole)), 2));
+  chk('榫眼孔 dogbone45: 不自交', !si(rh));
+  chk("dogbone45 r=0 是恒等变换", J.applyRelief(nom, 0, 'dogbone45').length === nom.length);
+  chk("dogbone45 确定性: 两次调用一致",
+    JSON.stringify(J.applyRelief(nom, 3.1, 'dogbone45')) === JSON.stringify(J.applyRelief(nom, 3.1, 'dogbone45')));
+
+  /* ---- 真实零件: 整套家具用 dogbone45 也必须全合法 ---- */
+  [1.5875, 3.175, 5].forEach(function (rr) {
+    var res = Models.box({
+      thickness: 15, width: 600, depth: 320, height: 720,
+      fit: 0.2, shelves: 2, relief: rr, reliefType: 'dogbone45'
+    });
+    var errs = [];
+    res.parts.forEach(function (pt) {
+      pt.validate().forEach(function (m) { if (m.level === 'error') errs.push(pt.name + ':' + m.text); });
+    });
+    chk('箱体柜 刀r=' + rr + ' dogbone45: ' + res.parts.length + ' 个零件全合法',
+      errs.length === 0 && res.parts.length >= 5, errs.slice(0, 2).join(' | '));
+  });
+})();
+
+} catch (e) { chk('EXCEPTION ' + e.message, false, e.stack); }var fails = L.filter(function (s) { return /^FAIL/.test(s); });
 document.getElementById('out').textContent =
   'TOTAL ' + L.length + '   FAILS ' + fails.length + '\n\n' + L.join('\n');
 document.title = (fails.length ? 'FAIL ' + fails.length : 'ALL PASS') + ' · 让位';

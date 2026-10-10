@@ -300,6 +300,12 @@ window.onload = function () {
       chk('grain off no verify err', w.Nest.verify(w.__app.state.nest, w.__app.sheetOpts()).length === 0);
       d.getElementById('respectGrain').checked = true;
       d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
+      /* 【锁定必须还原】后面还有"全配方切换"的循环: 配方里有长板（板式床架的
+       * 2000mm 长床梁, grain=cross），纹理锁着不许转 90°，2000 的梁塞不进
+       * 1220 宽的板材 -> 排样报 oversize，"recipe bedframe nest ok" 就红了。
+       * 锁定只是这一段的测试前提，用完必须关掉。 */
+      d.getElementById('respectGrain').checked = false;
+      d.getElementById('respectGrain').dispatchEvent(new w.Event('change'));
 
       /* ---- 清单: 停用行 / 非法尺寸 ---- */
       var nBefore = w.__app.state.result.parts.length;

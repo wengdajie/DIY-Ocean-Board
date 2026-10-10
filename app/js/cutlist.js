@@ -241,6 +241,36 @@
           note: '四角让开踢脚线 / 底边缺口过线'
         }];
       }
+    },
+    /* ---- 下面两个来自开源 CNC 社区里最常见的做法 ---- */
+    toolTray: {
+      /* Boxes.py（GPL）的 Type tray / 工具盘：四边围板夹底板 + 长边开手提孔，
+       * 同尺寸做几个还能叠着放。 */
+      label: '工具托盘（围板 + 手提孔）',
+      rows: function (t) {
+        var L = 380, W = 240, H = 70;
+        return [
+          { name: '底板', len: L - 2 * t, wid: W - 2 * t, qty: 1, grain: 'long', note: '四边嵌在围板之间（按板厚扣料）' },
+          {
+            name: '长围板', len: L, wid: H, qty: 2, grain: 'long',
+            holes: [{ type: 'slot', x: 0, y: 0, ref: 'center', len: 90, d: 26, ang: 0 }],
+            note: '中间腰形孔 = 手提孔（ref=center，别用 bl+x=0）'
+          },
+          { name: '短围板', len: W - 2 * t, wid: H, qty: 2, grain: 'cross' }
+        ];
+      }
+    },
+    ventPanel: {
+      /* 阵列孔板：机箱散热板、音箱背板、防潮垫板都是它，孔距按 24 排满并整体居中。 */
+      label: '散热 / 阵列孔板',
+      rows: function (t) {
+        return [{
+          name: '孔板', len: 400, wid: 300, qty: 1, grain: 'long',
+          corners: { all: { type: 'round', size: 12 } },
+          pegboard: { dia: 8, pitch: 24, margin: 18 },
+          note: '阵列 Ø8 孔，孔距 24，四周留边 18'
+        }];
+      }
     }
   };
 

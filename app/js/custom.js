@@ -104,6 +104,7 @@
     var fit = num(cfg.fit, 0.2);
     var relief = num(cfg.relief, 0), rtype = cfg.reliefType || 'none';
     var ropts = (cfg && cfg.earLen !== undefined) ? { earLen: num(cfg.earLen, 2) } : {};
+    if (cfg && cfg.earSide === 'out') ropts.earSide = 'out';
     var tenonCount = Math.max(1, Math.round(num(cfg.tenonCount, 3)));
     var warn = [], parts = [], i, j;
 
@@ -229,7 +230,7 @@
         var segs = pl.edges[k];
         if (!segs.length) { eg[k] = null; return; }
         if (!F) { eg[k] = [].concat.apply([], segs); return; }
-        var rv = F.resolveEdge(segs);
+        var rv = F.resolveEdge(segs, k);
         if (rv.dropped.length) {
           /* 同一条边被多处接合抢用。这是**设计上的过约束**, 不是几何错误:
            * 降级后的零件轮廓仍然合法、仍然能切出来, 只是被放弃的那几处
@@ -777,7 +778,7 @@
    * 全部样式专属参数**在这里静默丢失** —— 即使 app.js 一路传下来,
    * 配方模式永远只能得到指接, 而下拉框看着是生效的。
    * 现在把整组透传, 只覆盖 panels。 */
-  var PASS_KEYS = ['fit', 'relief', 'reliefType', 'earLen', 'tenonCount', 'jointStyle', 'lapStyle',
+  var PASS_KEYS = ['fit', 'relief', 'reliefType', 'earLen', 'earSide', 'tenonCount', 'jointStyle', 'lapStyle',
     'dovetailAngle', 'fingerW', 'tipRadius', 'rootRadius', 'chamfer',
     'wedgeExt', 'wedgeSlotW', 'wedgeTaper', 'snapLip', 'snapBarb', 'snapSlit',
     'grooveDepth', 'dowelDia', 'dowelCount', 'biscuitWide', 'biscuitLen', 'tongueInset'];
@@ -1032,6 +1033,431 @@
             u0: t, u1: W - t, v0: 0, v1: D - num(p.setback, 0), grain: 'long'
           });
         }
+        return panels;
+      }
+    },
+
+    /* ============================================================
+     * 开源方案移植的第二批配方（第 11 轮）
+     *
+     * 来源与取舍：这些都是**开源 CNC / 板式家具社区**里流传最广的几种做法，
+     * 逐个改写成"板位表 + 自动榫卯"能表达的形态：
+     *   · Boxes.py（GPL，florianfesti/boxes）—— 参数化盒子/杂志夹/托盘，
+     *     指接 + 平燕尾，按板厚自动缩放指宽。它的 MagazineFile 启发了 magfile。
+     *   · OpenDesk（CC-BY）与 AtFAB 系列 —— 用"互相咬合的木鳍/插片"代替五金，
+     *     开放格栅式的箱体。clothrack / cratebox 取的是这套"少板、少五金"的思路。
+     *   · Evil Mad Scientist 的 CNC Workstation Cart —— 立式带轮工具车，cart。
+     *   · Ronen Kadushin 的 Italic Shelf / Boxes.py 的壁挂系列 —— 靠墙竖条衬托层板，
+     *     wallrail 就是这种"两根条撑一排板"的极简挂墙系统。
+     *
+     * 【与原有 16 个配方的分工】原有配方覆盖箱体/柜架/酒格/桌凳这些"家具本体"；
+     * 这批补的是**桌面与小件收纳**（增高架、文件架、杂志架、板条箱）与
+     * **可移动/可挂墙**的两类结构性缺口。
+     *
+     * 【为什么全部写成 panels 而不是 build】这批结构都是轴对齐的矩形板组合，
+     * 板位表能完整表达 -> expandable = true，可以"转为板位表继续改"。
+     * ============================================================ */
+
+    /* --- 17) 杂志架 / 报刊夹（前低后高，杂志斜靠不倒） --- */
+    magfile: {
+      label: '杂志架 / 报刊夹',
+      group: '置物架',
+      dims: { width: 320, depth: 250, height: 400, thickness: 12 },
+      hint: '两块侧板 + 底板 + 高后挡板 + 矮前挡条：前低后高，杂志斜靠不倒又好抽。',
+      fields: [
+        { id: 'bays', label: '分格数', type: 'number', value: 1, min: 1, max: 4, step: 1 },
+        { id: 'frontH', label: '前挡高', type: 'number', value: 90, step: 10, min: 0, unit: 'mm' }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 12);
+        var W = num(p.width, 320), D = num(p.depth, 250), H = num(p.height, 400);
+        var bays = Math.max(1, Math.round(num(p.bays, 1)));
+        var fh = G.clamp(num(p.frontH, 90), 0, Math.max(0, H - t * 3));
+        var panels = [
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'B', name: '底板', plane: 'XY', at: t / 2, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' },
+          /* 后挡板从底板上表面起（v0 = t）：与底板的榫眼带相邻而不重叠 */
+          { id: 'K', name: '后挡板', plane: 'XZ', at: D - t / 2, u0: t, u1: W - t, v0: t, v1: H, grain: 'long' }
+        ];
+        if (fh > t * 1.2) {
+          panels.push({ id: 'F', name: '前挡条', plane: 'XZ', at: t / 2, u0: t, u1: W - t, v0: t, v1: fh, grain: 'long' });
+        }
+        for (var i = 1; i < bays; i++) {
+          panels.push({
+            id: 'V' + i, name: '竖隔板' + i, plane: 'YZ',
+            at: t + (W - 2 * t) * i / bays, u0: 0, u1: D, v0: t, v1: H - t, grain: 'cross'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 18) 可叠板条箱（开放箱体，几只叠起来就是收纳墙） --- */
+    cratebox: {
+      label: '可叠板条箱',
+      group: '柜架',
+      dims: { width: 400, depth: 300, height: 260, thickness: 12 },
+      hint: '底板 + 两侧板 + 后板，前面开口好拿取；同一尺寸做几只就能叠成收纳墙。',
+      fields: [
+        { id: 'stacks', label: '叠放层数', type: 'number', value: 1, min: 1, max: 6, step: 1 },
+        { id: 'backStyle', label: '背板', type: 'select', value: 'tenon',
+          options: [['tenon', '通榫背板'], ['none', '不要背板']] }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 12);
+        var W = num(p.width, 400), D = num(p.depth, 300), H = num(p.height, 260);
+        var n = Math.max(1, Math.round(num(p.stacks, 1)));
+        var withBack = (p.backStyle || 'tenon') === 'tenon';
+        var inner = innerDepth(t, D, withBack ? 'tenon' : 'none');
+        var panels = [];
+        for (var k = 0; k < n; k++) {
+          var z0 = k * H, sfx = n > 1 ? ('-' + (k + 1)) : '';
+          var idk = n > 1 ? String(k + 1) : '';
+          panels.push({ id: 'L' + idk, name: '左侧板' + sfx, plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: z0, v1: z0 + H, grain: 'cross' });
+          panels.push({ id: 'R' + idk, name: '右侧板' + sfx, plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: z0, v1: z0 + H, grain: 'cross' });
+          panels.push({ id: 'B' + idk, name: '底板' + sfx, plane: 'XY', at: z0 + t / 2, u0: t, u1: W - t, v0: 0, v1: inner, grain: 'long' });
+          if (withBack) {
+            panels.push({ id: 'K' + idk, name: '后板' + sfx, plane: 'XZ', at: D - t / 2, u0: t, u1: W - t, v0: z0 + t, v1: z0 + H, grain: 'long' });
+          }
+        }
+        return panels;
+      }
+    },
+
+    /* --- 19) 移动工具车 / 三层推车 --- */
+    cart: {
+      label: '移动工具车',
+      group: '家具',
+      dims: { width: 500, depth: 350, height: 700, thickness: 15 },
+      hint: '三层开放层板 + 可选背板，侧板落地、底部留脚轮空间；层板通榫，推起来不散。',
+      fields: [
+        { id: 'shelves', label: '层板数', type: 'number', value: 3, min: 1, max: 8, step: 1 },
+        { id: 'foot', label: '底部离地', type: 'number', value: 60, step: 10, min: 0, unit: 'mm' },
+        { id: 'backStyle', label: '背板', type: 'select', value: 'none',
+          options: [['none', '无背板'], ['tenon', '通榫背板']] }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 15);
+        var W = num(p.width, 500), D = num(p.depth, 350), H = num(p.height, 700);
+        var ns = Math.max(1, Math.round(num(p.shelves, 3)));
+        var foot = G.clamp(num(p.foot, 60), 0, Math.max(0, H - t * 4));
+        var withBack = (p.backStyle || 'none') === 'tenon';
+        var inner = innerDepth(t, D, withBack ? 'tenon' : 'none');
+        var panels = [
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' }
+        ];
+        /* 层板从 foot 起等分到顶：底层离地留脚轮 */
+        var lo = foot + t / 2, hi = H - t / 2;
+        for (var k = 0; k < ns; k++) {
+          var z = ns === 1 ? (lo + hi) / 2 : lo + (hi - lo) * k / (ns - 1);
+          panels.push({
+            id: 'S' + k, name: k === 0 ? '底层板' : (k === ns - 1 ? '顶层板' : '层板' + k),
+            plane: 'XY', at: z, u0: t, u1: W - t, v0: 0, v1: inner, grain: 'long'
+          });
+        }
+        if (withBack) {
+          panels.push({ id: 'K', name: '背板', plane: 'XZ', at: D - t / 2, u0: t, u1: W - t, v0: foot, v1: H, grain: 'long' });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 20) 壁挂挂条置物系统（两根靠墙窄立板 + 一排通榫层板） --- */
+    wallrail: {
+      label: '壁挂挂条置物系统',
+      group: '置物架',
+      dims: { width: 900, depth: 220, height: 600, thickness: 15 },
+      hint: '两根贴墙的窄立板（剖面"深 railW × 厚 t"）+ 一排全深层板：层板在窄板侧面上出通榫，正面完全敞开，占墙面不占地。',
+      fields: [
+        { id: 'shelves', label: '层板数', type: 'number', value: 3, min: 1, max: 8, step: 1 },
+        { id: 'railW', label: '挂条深度', type: 'number', value: 60, step: 10, min: 0, unit: 'mm' }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 15);
+        var W = num(p.width, 900), D = num(p.depth, 220), H = num(p.height, 600);
+        var ns = Math.max(1, Math.round(num(p.shelves, 3)));
+        /* 挂条深度不能太薄：层板要在它**侧面**上出通榫, 接合面太窄排不下榫齿。 */
+        var rw = G.clamp(num(p.railW, 60), t * 2, Math.max(t * 2, D * 0.8));
+        var railY0 = Math.max(t, D - rw);
+        /* 挂条做成 YZ 面的窄立板（厚 t 在 x 向、深 rw 在 y 向、通高），
+         * 层板做成 XY 面的**全深**板。这样两者交线轴 = y：
+         *   · 层板左/右端面顶在挂条内侧面 -> 每条端边**只有一处**接合（不会过约束）；
+         *   · 挂条侧面上得到的是 t 厚的**通榫眼**，榫头真穿透，是这一体式系统的力学来源；
+         *   · 全深让 y 向重叠区 = [D-rw, D] 为正 —— 若层板只做半深, y 向零重叠,
+         *     求解器会判"两板不接触"，一个榫都不会生成（实测过）。 */
+        var panels = [
+          { id: 'RL', name: '左挂条', plane: 'YZ', at: t / 2, u0: railY0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'RR', name: '右挂条', plane: 'YZ', at: W - t / 2, u0: railY0, u1: D, v0: 0, v1: H, grain: 'cross' }
+        ];
+        /* 层板高度两端各留一个板厚：贴着挂条的上下端会退化成"角接",
+         * 榫齿会被画到挂条端面上而不是侧面上。 */
+        var lo = t, hi = Math.max(t, H - t);
+        for (var k = 0; k < ns; k++) {
+          var z = ns === 1 ? H / 2 : lo + (hi - lo) * k / (ns - 1);
+          panels.push({
+            id: 'S' + k, name: k === 0 ? '底层板' : (k === ns - 1 ? '顶层板' : '层板' + k),
+            plane: 'XY', at: G.clamp(z, t / 2, H - t / 2),
+            u0: t, u1: W - t, v0: 0, v1: D, grain: 'long'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 21) 开放挂衣架（顶板 + 两侧板 + 挂杆跨板 + 底鞋板） --- */
+    clothrack: {
+      label: '开放挂衣架',
+      group: '家具',
+      dims: { width: 900, depth: 400, height: 1800, thickness: 18 },
+      hint: '顶板 + 两侧板 + 一块挂杆跨板 + 底部鞋板；挂衣杆（φ25 圆木/钢管）架在跨板上，不用五金。',
+      fields: [
+        { id: 'railDrop', label: '挂杆板下沿离顶', type: 'number', value: 160, step: 10, min: 40, unit: 'mm' },
+        { id: 'shelves', label: '底鞋板数', type: 'number', value: 1, min: 0, max: 4, step: 1 }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 18);
+        var W = num(p.width, 900), D = num(p.depth, 400), H = num(p.height, 1800);
+        var drop = G.clamp(num(p.railDrop, 160), t * 2, H * 0.4);
+        var ns = Math.max(0, Math.round(num(p.shelves, 1)));
+        var sleeve = Math.max(t * 2, Math.min(120, H * 0.12));       // 挂杆跨板高度
+        var panels = [
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'T', name: '顶板', plane: 'XY', at: H - t / 2, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' },
+          /* 挂杆跨板：竖向板，下沿 = H - drop，挂杆就搭在它下边的缺口上 */
+          { id: 'H', name: '挂杆跨板', plane: 'XZ', at: D / 2, u0: t, u1: W - t,
+            v0: Math.max(t, H - drop), v1: Math.max(t * 2, H - drop + sleeve), grain: 'long',
+            note: '下沿留 φ25 挂杆位（可按实配圆木/钢管后钻孔）' }
+        ];
+        for (var k = 0; k < ns; k++) {
+          panels.push({
+            id: 'S' + k, name: k === 0 ? '底鞋板' : '鞋板' + k, plane: 'XY',
+            at: t + t / 2 + (t + 110) * k, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 22) 显示器增高架（平台 + 下层抽拉空间） --- */
+    monstand: {
+      label: '显示器增高架',
+      group: '家具',
+      dims: { width: 600, depth: 220, height: 130, thickness: 15 },
+      hint: '一块台面 + 两片立板 + 一块下层板：垫高显示器，下层正好放键盘或收纳盒。',
+      fields: [
+        { id: 'dividers', label: '中间竖隔板数', type: 'number', value: 0, min: 0, max: 3, step: 1 },
+        { id: 'midShelf', label: '中间层板', type: 'check', value: false }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 15);
+        var W = num(p.width, 600), D = num(p.depth, 220), H = num(p.height, 130);
+        var nd = Math.max(0, Math.round(num(p.dividers, 0)));
+        var panels = [
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'T', name: '台面', plane: 'XY', at: H - t / 2, u0: 0, u1: W, v0: 0, v1: D, grain: 'long' },
+          { id: 'B', name: '下层板', plane: 'XY', at: t + t / 2, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' }
+        ];
+        for (var i = 1; i <= nd; i++) {
+          panels.push({
+            id: 'V' + i, name: '竖隔板' + i, plane: 'YZ',
+            at: t + (W - 2 * t) * i / (nd + 1), u0: 0, u1: D, v0: 0, v1: H, grain: 'cross'
+          });
+        }
+        if (p.midShelf) {
+          var z = t * 2 + (H - t * 3) / 2;
+          if (z > t * 3) {
+            panels.push({ id: 'M', name: '中层板', plane: 'XY', at: z, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' });
+          }
+        }
+        return panels;
+      }
+    },
+
+    /* ============================================================
+     * 开源图纸移植第三批（第 12 轮）
+     * 来源：AtFAB 的 Silver Lining Bed / 90 Minute Sofa / Cellular Screen、
+     * OpenDesk Café Table 一脉的"大板少五金"做法，以及 Boxes.py 的
+     * DiscRack（竖插格）。共同点：全部是轴对齐矩形板，板位表能完整表达。
+     * ============================================================ */
+
+    /* --- 23) 板式床架 --- */
+    bedframe: {
+      label: '板式床架',
+      group: '家具',
+      dims: { width: 1500, depth: 2000, height: 300, thickness: 18 },
+      hint: '床头板 + 床尾板 + 两根长边梁 + 一排床板条：板条两端出榫插进梁里，不用一根螺丝。',
+      fields: [
+        { id: 'slats', label: '床板条数', type: 'number', value: 9, min: 3, max: 20, step: 1 },
+        { id: 'legH', label: '床梁高', type: 'number', value: 180, step: 10, min: 60, unit: 'mm' }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 18);
+        var W = num(p.width, 1500), D = num(p.depth, 2000), H = num(p.height, 300);
+        var ns = Math.max(3, Math.round(num(p.slats, 9)));
+        var legH = G.clamp(num(p.legH, 180), t * 2, Math.max(t * 2, H - t));
+        var panels = [
+          { id: 'HK', name: '床头板', plane: 'XZ', at: t / 2, u0: 0, u1: W, v0: 0, v1: H, grain: 'cross' },
+          { id: 'FT', name: '床尾板', plane: 'XZ', at: D - t / 2, u0: 0, u1: W, v0: 0, v1: H, grain: 'cross' },
+          /* 长边梁夹在床头/床尾板之间, 高度只到梁顶 —— 板条搁在梁的上沿 */
+          { id: 'L', name: '左床梁', plane: 'YZ', at: t / 2, u0: t, u1: D - t, v0: 0, v1: legH, grain: 'cross' },
+          { id: 'R', name: '右床梁', plane: 'YZ', at: W - t / 2, u0: t, u1: D - t, v0: 0, v1: legH, grain: 'cross' }
+        ];
+        /* 床板条: 两端出榫进梁; y 向等分, 且与床头/床尾板各留一个板厚
+         * (贴着端板会变成角接, 榫齿会被画到端板端面上)。 */
+        var lo = t * 2, hi = Math.max(lo + t, D - t * 2);
+        for (var k = 0; k < ns; k++) {
+          var y = lo + (hi - lo) * (ns === 1 ? 0.5 : k / (ns - 1));
+          panels.push({
+            id: 'S' + k, name: '床板条' + (k + 1), plane: 'XY',
+            at: legH + t / 2, u0: t, u1: W - t,
+            v0: G.clamp(y - t / 2, t, D - t), v1: G.clamp(y + t / 2, t, D - t),
+            grain: 'cross'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 24) 板式沙发 / 罗汉床 --- */
+    sofa: {
+      label: '板式沙发 / 罗汉床',
+      group: '家具',
+      dims: { width: 1600, depth: 700, height: 650, thickness: 18 },
+      hint: '两块扶手侧板 + 靠背板 + 座板 + 前挡条：座板四边都出榫，坐上去不晃，垫上垫子就是沙发。',
+      fields: [
+        { id: 'seatH', label: '座面高', type: 'number', value: 380, step: 10, min: 100, unit: 'mm' }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 18);
+        var W = num(p.width, 1600), D = num(p.depth, 700), H = num(p.height, 650);
+        var seat = G.clamp(num(p.seatH, 380), t * 3, Math.max(t * 3, H - t * 2));
+        return [
+          { id: 'L', name: '左扶手板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右扶手板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'K', name: '靠背板', plane: 'XZ', at: D - t / 2, u0: t, u1: W - t, v0: seat, v1: H, grain: 'long' },
+          /* 座板: 左右插进扶手, 后边顶靠背, 前边顶前挡条 —— 四条边各一处接合 */
+          { id: 'S', name: '座板', plane: 'XY', at: seat - t / 2, u0: t, u1: W - t, v0: t, v1: D - t, grain: 'long' },
+          { id: 'F', name: '前挡条', plane: 'XZ', at: t / 2, u0: t, u1: W - t, v0: 0, v1: seat - t, grain: 'long' }
+        ];
+      }
+    },
+
+    /* --- 25) 茶几 / 边几 --- */
+    coffeetable: {
+      label: '茶几 / 边几',
+      group: '家具',
+      dims: { width: 900, depth: 500, height: 400, thickness: 18 },
+      hint: '一块顶板 + 两块端板 + 一两块下层板：OpenDesk Café Table 那种极简做法，沙发边正好。',
+      fields: [
+        { id: 'shelves', label: '下层板数', type: 'number', value: 1, min: 0, max: 3, step: 1 }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 18);
+        var W = num(p.width, 900), D = num(p.depth, 500), H = num(p.height, 400);
+        var ns = Math.max(0, Math.round(num(p.shelves, 1)));
+        var panels = [
+          { id: 'T', name: '顶板', plane: 'XY', at: H - t / 2, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' },
+          { id: 'L', name: '左端板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右端板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' }
+        ];
+        /* 下层板从贴地到顶板下沿之间等分, 与顶板保持一个板厚以上 */
+        var lo = t * 1.5, hi = Math.max(lo, H - t * 2.5);
+        for (var k = 0; k < ns; k++) {
+          var z = ns === 1 ? (lo + hi) / 2 : lo + (hi - lo) * k / (ns - 1);
+          panels.push({
+            id: 'M' + k, name: k === 0 ? '下层板' : '中层板' + k, plane: 'XY',
+            at: G.clamp(z, t / 2, H - t / 2), u0: t, u1: W - t, v0: 0, v1: D, grain: 'long'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 26) 唱片 / 笔记本竖插架 --- */
+    discrack: {
+      label: '唱片 / 笔记本竖插架',
+      group: '置物架',
+      dims: { width: 420, depth: 340, height: 320, thickness: 12 },
+      hint: '底板 + 两块侧板 + 一排前后向隔板：黑胶、乐谱、笔记本竖着插，一格格拉开不倒。',
+      fields: [
+        { id: 'slots', label: '隔板数', type: 'number', value: 5, min: 1, max: 20, step: 1 }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 12);
+        var W = num(p.width, 420), D = num(p.depth, 340), H = num(p.height, 320);
+        var n = Math.max(1, Math.round(num(p.slots, 5)));
+        var panels = [
+          { id: 'B', name: '底板', plane: 'XY', at: t / 2, u0: 0, u1: W, v0: 0, v1: D, grain: 'long' },
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' }
+        ];
+        /* 隔板做成前后向(XZ), 而不是左右向: 左右向隔板与侧板**共面**(都是 YZ),
+         * 求解器对同面两板只会走"交线轴 = y"的老路, 端面顶侧板内表面判不出接触。 */
+        for (var i = 1; i <= n; i++) {
+          panels.push({
+            id: 'D' + i, name: '隔板' + i, plane: 'XZ',
+            at: t + (D - t) * i / (n + 1), u0: t, u1: W - t, v0: t, v1: H, grain: 'long'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 27) 格栅屏风 / 隔断 --- */
+    screen: {
+      label: '格栅屏风 / 隔断',
+      group: '家具',
+      dims: { width: 1200, depth: 400, height: 1800, thickness: 15 },
+      hint: '底板 + 顶板 + 一排竖板：半通透隔断，光影好看，也能当书架背景墙。',
+      fields: [
+        { id: 'fins', label: '竖板数', type: 'number', value: 9, min: 3, max: 24, step: 1 }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 15);
+        var W = num(p.width, 1200), D = num(p.depth, 400), H = num(p.height, 1800);
+        var n = Math.max(3, Math.round(num(p.fins, 9)));
+        var panels = frameOf(t, W, D, H);
+        for (var i = 1; i <= n; i++) {
+          panels.push({
+            id: 'F' + i, name: '竖板' + i, plane: 'YZ',
+            at: t + (W - 2 * t) * i / (n + 1), u0: 0, u1: D, v0: t, v1: H - t, grain: 'cross'
+          });
+        }
+        return panels;
+      }
+    },
+
+    /* --- 28) 宠物窝 / 猫舍 --- */
+    pethouse: {
+      label: '宠物窝 / 猫舍',
+      group: '家具',
+      dims: { width: 500, depth: 450, height: 400, thickness: 15 },
+      hint: '五面板 + 前板开圆门：用本工具的圆孔特征开门口，孔径随尺寸自动夹进安全范围。',
+      fields: [
+        { id: 'doorDia', label: '圆门直径', type: 'number', value: 200, step: 10, min: 60, unit: 'mm' }
+      ],
+      panels: function (p) {
+        var t = num(p.thickness, 15);
+        var W = num(p.width, 500), D = num(p.depth, 450), H = num(p.height, 400);
+        var bw = W - 2 * t, bh = H - 2 * t;
+        /* 圆门: 夹到"板宽/板高都留得出边距"的范围内, 并保持水平居中
+         * (贴边的孔会被特征库的"孔距板边不足"检查拦下)。 */
+        var dia = G.clamp(num(p.doorDia, 200), t * 3, Math.max(t * 3, Math.min(bw, bh) * 0.5));
+        var panels = [
+          { id: 'B', name: '底板', plane: 'XY', at: t / 2, u0: 0, u1: W, v0: 0, v1: D, grain: 'long' },
+          { id: 'L', name: '左侧板', plane: 'YZ', at: t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'R', name: '右侧板', plane: 'YZ', at: W - t / 2, u0: 0, u1: D, v0: 0, v1: H, grain: 'cross' },
+          { id: 'T', name: '顶板', plane: 'XY', at: H - t / 2, u0: t, u1: W - t, v0: 0, v1: D, grain: 'long' },
+          { id: 'K', name: '背板', plane: 'XZ', at: D - t / 2, u0: t, u1: W - t, v0: t, v1: H - t, grain: 'long' },
+          { id: 'F', name: '前板', plane: 'XZ', at: t / 2, u0: t, u1: W - t, v0: t, v1: H - t,
+            grain: 'long',
+            holes: [{ type: 'circle', x: 0, y: 0, ref: 'center', d: G.round(dia, 1) }],
+            note: '圆门用圆孔特征开出，直径已按板宽/板高自动夹紧' }
+        ];
         return panels;
       }
     },
